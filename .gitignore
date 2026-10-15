@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Real people's names, emails and preferences: never commit.
+data/raw/
+data/store/
+data/examples/
+*.xlsx
+*:Zone.Identifier

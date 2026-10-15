@@ -1,0 +1,82 @@
+{
+  "department": "ME",
+  "name": "Mechanical Engineering",
+  "_comment": "Department-specific knowledge the workbook does not state. Every entry is something a person would otherwise have to know; edit here rather than in code.",
+
+  "service_courses": ["BITS F103", "BITS F111"],
+  "_service_courses": "Staffed as a department-wide duty: assigning someone who did not ask for them is not penalised, and their tutorials need not go to their lecturers. BITS F103 labs and BITS F111 tutorials are shared out this way in the Sem II 2025-26 allocation.",
+
+  "project_courses": ["ME F266", "ME F366", "ME F367", "ME F376", "ME F377"],
+  "project_ic_units": 1,
+  "wilp_units": 3,
+
+  "default_units": {"lecture": 3, "lab": 1},
+  "unit_overrides": {
+    "ME F318": {"lecture": 2, "lab": 1},
+    "ME F423": {"lecture": 3, "lab": 1},
+    "ME G624": {"lecture": 3, "lab": 1},
+    "ME G515": {"lecture": 3, "lab": 2},
+    "ME G534": {"lecture": 3, "lab": 2},
+    "MST G522": {"lecture": 3, "lab": 2},
+    "ME G611": {"lecture": 3, "lab": 2},
+    "MSE G512": {"lecture": 3, "lab": 2},
+    "ME F434": {"lecture": 3, "lab": 1},
+    "ME G633": {"lecture": 3, "lab": 1},
+    "ME G538": {"lecture": 3, "lab": 1},
+    "ME G539": {"lecture": 3, "lab": 1},
+    "ME F315": {"lecture": 3, "lab": 1}
+  },
+  "_unit_overrides": "Lecture and lab units where the workbook gives none (electives) or gives a value that does not add up (ME F318 is recorded as L2 P3 with no total). Read off the per-faculty Allocation sheet; the course database (lectureUnits / labUnits) is the authority once it is wired in.",
+
+  "course_aliases": {
+    "EDP": "BITS F103",
+    "THERMO": "BITS F111",
+    "TD": "BITS F111",
+    "AMOS": "ME F218",
+    "MP": "ME F219",
+    "HT": "ME F220",
+    "MNM": "ME F221",
+    "CAD": "ME F318",
+    "VC": "ME F319",
+    "EO": "ME F320",
+    "PMFM": "ME F341",
+    "PMFP": "ME F341",
+    "CFD": "ME G515",
+    "CAAD": "ME G611",
+    "MPC": "MSE G512",
+    "DIGTWIN": "ME F434",
+    "MICRO": "ME F423",
+    "MICROF": "ME F423",
+    "CIM": "ME G539",
+    "TOYOTA": "ME G538",
+    "WIND": "ME G633",
+    "ROBOTICS": "BITS F441",
+    "AMP UB": "ME F315",
+    "ENGINEERING OPTIMIZATION": "ME F320",
+    "ENGG OPTIMIZATION": "ME F320",
+    "CONVECTIVE HEAT AND MASS": "ME G534",
+    "MICROFLUIDICS FOR THERMAL ENGINEERS": "ME G624"
+  },
+
+  "name_aliases": {
+    "NSK": "N Suresh Kumar Reddy",
+    "SKD": "Satish Kumar Dubey",
+    "AP": "Amrita Priyadarshini",
+    "CPK": "Phaneendra Kiran Chaganti",
+    "KRC": "K. Ram Chandra Murthy",
+    "KRC Murthy": "K. Ram Chandra Murthy",
+    "Kalluri Ram Chandra Murthy": "K. Ram Chandra Murthy",
+    "AKG": "Amit Kumar Gupta",
+    "SSD": "Sandip S. Deshmukh",
+    "JP": "Jayaprakash K S",
+    "Jaya Prakash": "Jayaprakash K S",
+    "Njalaiah": "Jalaiah Nandanavanam",
+    "Nandanavanam Jalaiah": "Jalaiah Nandanavanam",
+    "SHINE JUDE HAMILTON A": "Hamilton",
+    "Erugu Prasanna": "E. Prasanna",
+    "Nitin Ramesh K": "Nitin Rameshrao Kotkunde"
+  },
+
+  "placeholder_staff": ["Civil-RS"],
+  "_placeholder_staff": "Entries in section rows that stand for staff from outside the department. They are kept as the section's external staff and never counted as a slot to fill."
+}
