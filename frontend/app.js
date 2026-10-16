@@ -169,9 +169,9 @@ async function viewHome() {
     issuesBox.replaceChildren();
     try {
       const q = new URLSearchParams({ department: dept.value, name: name.value, semester: semester.value, format: format.value, default_staffing: defaults.checked });
-      const res = await api(`/api/problems/import?${q}`, {
-        method: "POST", body: await file.files[0].arrayBuffer(), headers: { "Content-Type": "application/octet-stream" },
-      });
+      const form = new FormData();
+      form.append("file", file.files[0]);
+      const res = await api(`/api/problems/import?${q}`, { method: "POST", body: form });
       toast(`Imported (${res.format}) with ${res.notes.length} note(s).`);
       location.hash = `#/p/${encodeURIComponent(res.id)}/overview`;
     } catch (err) {

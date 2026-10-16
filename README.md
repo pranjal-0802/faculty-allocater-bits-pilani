@@ -21,16 +21,17 @@ scripts/dev.sh serve       # API + web app on http://localhost:8100
 scripts/dev.sh test        # test suite
 ```
 
-The virtualenv is `.venv/` (Python 3.12: fastapi, uvicorn, ortools, pydantic, pytest, httpx). Recreate it with:
+The virtualenv is `.venv/` (Python 3.12). Dependencies are declared in `pyproject.toml` and pinned in `requirements.lock`. Recreate the environment with:
 
 ```bash
-uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -e ".[dev]"
+uv venv --python 3.12 .venv && uv pip sync --python .venv/bin/python requirements.lock
+# after changing pyproject.toml:
+uv pip compile pyproject.toml --extra dev --python-version 3.12 -o requirements.lock
 ```
 
-The machine this was built on has no network inside WSL. Two consequences:
+**Spreadsheets:** `.xlsx` files are read and written with the standard library (`ingest/xlsx.py`, `ingest/xlsx_writer.py`), so there's no spreadsheet dependency at run time. openpyxl is a test dependency only. `tests/test_xlsx_crosscheck.py` checks that openpyxl reads every generated template identically, and agrees with the stdlib reader on every cell of the ME workbook. The one exception is date cells, which the stdlib reader returns as Excel serial numbers; no template or importer column uses dates.
 
-- **No pip packages.** It was installed with `uv pip install --offline` from the local uv cache. Excel files are read with a stdlib parser (`ingest/xlsx.py`), not openpyxl.
-- **No npm build.** The web app is plain HTML/JS served by the API, with no build step.
+**Web app:** plain HTML/JS served by the API, with no build step.
 
 ## Layout
 
@@ -179,7 +180,7 @@ What this shows:
 
 | Method and path | Purpose |
 |---|---|
-| `POST /api/problems/import?department=ME&name=&semester=&format=auto` | Body is the raw `.xlsx`. 422 with `issues` if a template has errors. |
+| `POST /api/problems/import?department=ME&name=&semester=&format=auto` | Multipart field `file` (`curl -F file=@x.xlsx`) or the raw `.xlsx` as the body. 422 with `issues` if a template has errors. |
 | `GET /api/template.xlsx?department=ME[&problem_id=]` | Blank or pre-filled upload template |
 | `GET /api/schema` | Template sheets and columns, plus the JSON Problem schema |
 | `GET /api/problems`, `GET/PUT/DELETE /api/problems/{id}` | List, read, replace, delete |

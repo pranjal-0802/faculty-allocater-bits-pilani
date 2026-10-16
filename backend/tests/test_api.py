@@ -69,6 +69,18 @@ def test_template_download_and_strict_upload(client):
     assert "properties" in schema["problem"]
 
 
+def test_multipart_upload(client):
+    p = problem([faculty("a")], [course("ME F219", lecture())], [pref("a", "ME F219")])
+    p.courses[0].title = "Manufacturing Processes"
+    client.post("/api/problems", json=p.model_dump(mode="json"))
+    filled = client.get("/api/template.xlsx?problem_id=t").content
+    r = client.post("/api/problems/import?department=ME&name=multipart",
+                    files={"file": ("allocation.xlsx", filled, "application/octet-stream")})
+    assert r.status_code == 201 and r.json()["format"] == "template"
+    r = client.post("/api/problems/import", files={"other": ("x.xlsx", filled)})
+    assert r.status_code == 400
+
+
 def test_bad_upload_is_rejected(client):
     r = client.post("/api/problems/import", content=b"not a workbook",
                     headers={"Content-Type": "application/octet-stream"})

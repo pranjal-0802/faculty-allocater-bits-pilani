@@ -3,9 +3,8 @@ HTTP API and static frontend.
 
     uvicorn allocator.api.main:app --port 8100
 
-Workbooks are uploaded as the raw request body (Content-Type
-application/octet-stream) rather than multipart form data, so the server
-needs no multipart parser.
+Workbooks are uploaded as multipart form data (field `file`) or as the raw
+request body (Content-Type application/octet-stream).
 """
 
 from __future__ import annotations
@@ -119,15 +118,23 @@ async def import_problem(
     default_staffing: bool = Query(False),
 ) -> dict:
     """
-    Import an .xlsx sent as the raw request body.
+    Import an .xlsx, sent either as a multipart form field named `file` (what
+    a browser form or `curl -F file=@...` sends) or as the raw request body.
 
     `format=auto` reads the upload template strictly when the file is one,
     and otherwise falls back to the legacy department-workbook reader. A
     template with errors is rejected whole, with every issue listed.
     """
-    body = await request.body()
+    if request.headers.get("content-type", "").startswith("multipart/form-data"):
+        form = await request.form()
+        upload = form.get("file")
+        if upload is None or isinstance(upload, str):
+            raise HTTPException(400, "Multipart upload needs a file field named 'file'.")
+        body = await upload.read()
+    else:
+        body = await request.body()
     if not body:
-        raise HTTPException(400, "Send the .xlsx file as the request body.")
+        raise HTTPException(400, "Send the .xlsx file as a 'file' form field or as the request body.")
     if len(body) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, "Workbook is larger than 20 MB.")
     try:
