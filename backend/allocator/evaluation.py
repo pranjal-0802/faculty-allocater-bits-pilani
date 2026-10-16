@@ -2,8 +2,11 @@
 Measure an allocation, and compare two.
 
 The same report runs on the solver's output and on the allocation the
-department made by hand, using the same load rule and the same reading of
-preferences, so the two can be set side by side honestly.
+department made by hand, using the same load rule, the same targets and the
+same reading of preferences, so the two can be set side by side honestly.
+It also lists any breach of the admin's hard rules (two CDCs, a course taken
+past the rotation limit): the solver never makes one, but a hand allocation
+or a lock can.
 """
 
 from __future__ import annotations
@@ -13,16 +16,9 @@ from collections import defaultdict
 
 from pydantic import BaseModel, Field
 
-from allocator.domain import (
-    IC_TARGET,
-    Allocation,
-    Course,
-    Person,
-    PersonKind,
-    Problem,
-    SectionKind,
-)
-from allocator.load import annotate_loads, load_band
+from allocator.domain import Allocation, Course, Problem, SectionKind
+from allocator.load import annotate_loads, load_targets
+from allocator.rules import cdc_holdings, rotation_breaches
 from allocator.settings import SolverSettings
 
 #: How an assignment relates to what the person asked for.
@@ -31,9 +27,7 @@ MATCH_ORDER = ["rank1", "rank2", "rank3", "rank4+", "cross_kind", "service", "un
 
 def classify(problem: Problem, person_id: str, course: Course, kind: SectionKind) -> str:
     prefs = [
-        p
-        for p in problem.preferences
-        if p.person_id == person_id and p.course_code == course.code
+        p for p in problem.preferences if p.person_id == person_id and p.course_code == course.code
     ]
     exact = [p for p in prefs if p.kind in (kind, None)]
     if exact:
@@ -47,14 +41,19 @@ def classify(problem: Problem, person_id: str, course: Course, kind: SectionKind
 class PersonRow(BaseModel):
     person_id: str
     name: str
-    kind: PersonKind
+    #: Teaching Allocation used, and whether it was assumed (left blank).
+    teaching_percent: float
+    percent_assumed: bool = False
     load: float
     external_load: float
     band_min: float
-    band_max: float
+    #: The person's target: the top of their band.
+    target: float
     status: str  # under / ok / over
     roles: list[str] = Field(default_factory=list)
     matches: dict[str, int] = Field(default_factory=dict)
+    #: CDCs held, when more than one.
+    cdcs: list[str] = Field(default_factory=list)
 
 
 class LoadSummary(BaseModel):
@@ -65,29 +64,49 @@ class LoadSummary(BaseModel):
     max: float = 0.0
     under: int = 0
     over: int = 0
+    #: Total units above people's targets.
+    excess: float = 0.0
+    #: The largest single overload.
+    max_over: float = 0.0
+
+
+class TargetInfo(BaseModel):
+    baseline: float
+    baseline_source: str
+    baseline_percent: float
+    work: float
+    target_total: float = 0.0
+    #: Units that must go over someone's target whatever the allocation:
+    #: the work less everyone's targets.
+    unavoidable_excess: float = 0.0
+    default_percent: float
+    assumed: int
 
 
 class Report(BaseModel):
     people: list[PersonRow] = Field(default_factory=list)
-    #: Per person-kind, how many (person, course, kind) holdings fall in each
-    #: preference bucket.
-    preference_matches: dict[str, dict[str, int]] = Field(default_factory=dict)
+    #: How many (person, course, kind) holdings fall in each preference bucket.
+    preference_matches: dict[str, int] = Field(default_factory=dict)
     #: Share of faculty who listed a first lecture choice and got to lecture it.
     first_lecture_choice_rate: float | None = None
-    load: dict[str, LoadSummary] = Field(default_factory=dict)
+    load: LoadSummary = Field(default_factory=LoadSummary)
+    targets: TargetInfo | None = None
     unfilled_slots: int = 0
-    courses_without_ic: list[str] = Field(default_factory=list)
+    #: Breaches of the hard rules, as sentences.
+    rule_breaches: list[str] = Field(default_factory=list)
+    cdc_breaches: int = 0
+    rotation_breaches: int = 0
 
 
 def report(problem: Problem, allocation: Allocation, settings: SolverSettings) -> Report:
     people = {p.id: p for p in problem.people}
     courses = {c.code: c for c in problem.courses}
-    assignments = annotate_loads(problem, allocation.assignments, settings)
+    assignments = annotate_loads(problem, allocation.assignments)
+    targets = load_targets(problem, settings)
 
     loads = {p.id: p.external_load for p in problem.people}
     roles: dict[str, list[str]] = defaultdict(list)
     holdings: set[tuple[str, str, SectionKind]] = set()
-    ics: set[str] = set()
 
     for a in assignments:
         if a.person_id not in people or a.course_code not in courses:
@@ -95,68 +114,98 @@ def report(problem: Problem, allocation: Allocation, settings: SolverSettings) -
         loads[a.person_id] += a.load
         suffix = f" ({a.note})" if a.note else ""
         roles[a.person_id].append(f"{a.course_code} {a.target}{suffix}")
-        if a.target == IC_TARGET:
-            ics.add(a.course_code)
-            continue
         section = next((s for s in courses[a.course_code].sections if s.id == a.target), None)
         if section:
             holdings.add((a.person_id, a.course_code, section.kind))
 
-    per_person_matches: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    by_kind: dict[str, dict[str, int]] = {
-        k.value: {m: 0 for m in MATCH_ORDER} for k in PersonKind
-    }
+    per_person: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    totals = {m: 0 for m in MATCH_ORDER}
     for pid, code, kind in holdings:
         bucket = classify(problem, pid, courses[code], kind)
-        per_person_matches[pid][bucket] += 1
-        by_kind[people[pid].kind.value][bucket] += 1
+        per_person[pid][bucket] += 1
+        totals[bucket] += 1
 
+    cdcs = cdc_holdings(problem, allocation, settings)
     rows = []
     for person in problem.people:
-        band = load_band(person, settings)
+        band = targets.bands[person.id]
         load = round(loads[person.id], 2)
         status = "under" if load < band.min - 1e-9 else "over" if load > band.max + 1e-9 else "ok"
         rows.append(
             PersonRow(
                 person_id=person.id,
                 name=person.name,
-                kind=person.kind,
+                teaching_percent=targets.percent[person.id],
+                percent_assumed=person.id in targets.assumed,
                 load=load,
                 external_load=person.external_load,
                 band_min=band.min,
-                band_max=band.max,
+                target=band.max,
                 status=status,
                 roles=sorted(roles[person.id]),
-                matches=dict(per_person_matches[person.id]),
+                matches=dict(per_person[person.id]),
+                cdcs=cdcs.get(person.id, []),
             )
         )
 
-    summaries = {}
-    for kind in PersonKind:
-        values = [r.load for r in rows if r.kind == kind]
-        if not values:
-            continue
-        summaries[kind.value] = LoadSummary(
+    values = [r.load for r in rows]
+    summary = LoadSummary()
+    if values:
+        summary = LoadSummary(
             count=len(values),
             mean=round(statistics.fmean(values), 2),
             stdev=round(statistics.pstdev(values), 2),
             min=min(values),
             max=max(values),
-            under=sum(1 for r in rows if r.kind == kind and r.status == "under"),
-            over=sum(1 for r in rows if r.kind == kind and r.status == "over"),
+            under=sum(1 for r in rows if r.status == "under"),
+            over=sum(1 for r in rows if r.status == "over"),
+            excess=round(sum(max(0.0, r.load - r.target) for r in rows), 2),
+            max_over=round(max(max(0.0, r.load - r.target) for r in rows), 2),
         )
 
-    first_choice = _first_lecture_choice_rate(problem, holdings)
+    name = lambda pid: people[pid].name if pid in people else pid  # noqa: E731
+    names = {pid: p.name for pid, p in people.items()}
+    fixed = _fixed_courses(problem)
+    breaches = [
+        f"{name(pid)} holds {len(codes)} CDCs: {', '.join(codes)}."
+        + (" (Fixed by the department's pre-assignments.)"
+           if sum(c in fixed.get(pid, ()) for c in codes) > 1 else "")
+        for pid, codes in cdcs.items()
+    ]
+    rotation = rotation_breaches(problem, allocation, settings)
+    breaches += [f"{bar.describe(names)} Holds {target}." for bar, target in rotation]
+
     return Report(
         people=rows,
-        preference_matches=by_kind,
-        first_lecture_choice_rate=first_choice,
-        load=summaries,
-        unfilled_slots=sum(u.missing for u in allocation.unfilled),
-        courses_without_ic=sorted(
-            c.code for c in problem.courses if c.ic_required and c.code not in ics
+        preference_matches=totals,
+        first_lecture_choice_rate=_first_lecture_choice_rate(problem, holdings),
+        load=summary,
+        targets=TargetInfo(
+            baseline=targets.baseline,
+            baseline_source=targets.baseline_source,
+            baseline_percent=targets.baseline_percent,
+            work=targets.work,
+            target_total=targets.target_total,
+            unavoidable_excess=round(max(0.0, targets.work - targets.target_total), 2),
+            default_percent=targets.default_percent,
+            assumed=len(targets.assumed),
         ),
+        unfilled_slots=sum(u.missing for u in allocation.unfilled),
+        rule_breaches=breaches,
+        cdc_breaches=len(cdcs),
+        rotation_breaches=len(rotation),
     )
+
+
+def _fixed_courses(problem: Problem) -> dict[str, set[str]]:
+    """Person -> courses the department pre-assigned them to."""
+    from allocator.domain import LockMode
+
+    out: dict[str, set[str]] = defaultdict(set)
+    for lock in problem.locks:
+        if lock.mode == LockMode.REQUIRE:
+            out[lock.person_id].add(lock.course_code)
+    return out
 
 
 def _first_lecture_choice_rate(
@@ -170,9 +219,7 @@ def _first_lecture_choice_rate(
     }
     if not wanted:
         return None
-    got = sum(
-        1 for pid, code in wanted.items() if (pid, code, SectionKind.LECTURE) in holdings
-    )
+    got = sum(1 for pid, code in wanted.items() if (pid, code, SectionKind.LECTURE) in holdings)
     return round(got / len(wanted), 3)
 
 
@@ -182,7 +229,6 @@ def _first_lecture_choice_rate(
 class SectionDiff(BaseModel):
     course_code: str
     target: str
-    kind: PersonKind
     solver: list[str]
     reference: list[str]
     match: bool
@@ -190,13 +236,12 @@ class SectionDiff(BaseModel):
 
 class Comparison(BaseModel):
     #: Share of the reference's (person, course, section) assignments the
-    #: solver reproduced, per person kind.
-    recall: dict[str, float] = Field(default_factory=dict)
+    #: solver reproduced.
+    recall: float | None = None
     #: Share of reference lecture-section faculty the solver reproduced.
     lecture_recall: float | None = None
-    ic_agreement: float | None = None
     #: Share of sections whose staff the two allocations agree on exactly.
-    exact_sections: dict[str, float] = Field(default_factory=dict)
+    exact_sections: float | None = None
     reference_report: Report | None = None
     sections: list[SectionDiff] = Field(default_factory=list)
 
@@ -210,59 +255,43 @@ def compare(
     people = {p.id: p for p in problem.people}
     courses = {c.code: c for c in problem.courses}
 
-    def staff(alloc: Allocation) -> dict[tuple[str, str, PersonKind], set[str]]:
-        out: dict[tuple[str, str, PersonKind], set[str]] = defaultdict(set)
+    def staff(alloc: Allocation) -> dict[tuple[str, str], set[str]]:
+        out: dict[tuple[str, str], set[str]] = defaultdict(set)
         for a in alloc.assignments:
-            person = people.get(a.person_id)
-            if person and a.course_code in courses:
-                out[(a.course_code, a.target, person.kind)].add(a.person_id)
+            if a.person_id in people and a.course_code in courses:
+                out[(a.course_code, a.target)].add(a.person_id)
         return out
 
     mine, theirs = staff(allocation), staff(reference)
-    keys = sorted(set(mine) | set(theirs), key=lambda k: (k[0], k[1], k[2].value))
+    keys = sorted(set(mine) | set(theirs))
 
-    recall: dict[str, float] = {}
-    exact: dict[str, float] = {}
-    for kind in PersonKind:
-        ref_pairs = [(k, p) for k, ps in theirs.items() if k[2] == kind for p in ps]
-        if ref_pairs:
-            hit = sum(1 for k, p in ref_pairs if p in mine.get(k, set()))
-            recall[kind.value] = round(hit / len(ref_pairs), 3)
-        kind_keys = [k for k in keys if k[2] == kind and k[1] != IC_TARGET]
-        if kind_keys:
-            same = sum(1 for k in kind_keys if mine.get(k, set()) == theirs.get(k, set()))
-            exact[kind.value] = round(same / len(kind_keys), 3)
+    def share(hits: int, total: int) -> float | None:
+        return round(hits / total, 3) if total else None
 
-    lecture_keys = [
-        k
-        for k in theirs
-        if k[2] == PersonKind.FACULTY
-        and k[1] != IC_TARGET
-        and any(
-            s.id == k[1] and s.kind == SectionKind.LECTURE
-            for s in courses[k[0]].sections
-        )
+    ref_pairs = [(k, p) for k, ps in theirs.items() for p in ps]
+    recall = share(sum(1 for k, p in ref_pairs if p in mine.get(k, set())), len(ref_pairs))
+    section_keys = keys
+    exact = share(
+        sum(1 for k in section_keys if mine.get(k, set()) == theirs.get(k, set())),
+        len(section_keys),
+    )
+
+    lecture_pairs = [
+        (k, p)
+        for k, ps in theirs.items()
+        if any(s.id == k[1] and s.kind == SectionKind.LECTURE for s in courses[k[0]].sections)
+        for p in ps
     ]
-    lecture_pairs = [(k, p) for k in lecture_keys for p in theirs[k]]
-    lecture_recall = (
-        round(sum(1 for k, p in lecture_pairs if p in mine.get(k, set())) / len(lecture_pairs), 3)
-        if lecture_pairs
-        else None
+    lecture_recall = share(
+        sum(1 for k, p in lecture_pairs if p in mine.get(k, set())), len(lecture_pairs)
     )
 
-    ic_keys = [k for k in theirs if k[1] == IC_TARGET]
-    ic_agreement = (
-        round(sum(1 for k in ic_keys if mine.get(k) == theirs[k]) / len(ic_keys), 3)
-        if ic_keys
-        else None
-    )
 
     name = lambda pid: people[pid].name if pid in people else pid  # noqa: E731
     diffs = [
         SectionDiff(
             course_code=k[0],
             target=k[1],
-            kind=k[2],
             solver=sorted(name(p) for p in mine.get(k, set())),
             reference=sorted(name(p) for p in theirs.get(k, set())),
             match=mine.get(k, set()) == theirs.get(k, set()),
@@ -272,7 +301,6 @@ def compare(
     return Comparison(
         recall=recall,
         lecture_recall=lecture_recall,
-        ic_agreement=ic_agreement,
         exact_sections=exact,
         reference_report=report(problem, reference, settings),
         sections=diffs,

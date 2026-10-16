@@ -150,7 +150,9 @@ def match_score(query: str, candidate: str) -> float:
         if hit is not None:
             used.add(hit[1])
             total += hit[0]
-            whole += hit[0] >= 1.6
+            # A shared initial ("K" = "K") is not a whole word: without this,
+            # scholar "K Suhasini" matched faculty "Jayaprakash K S".
+            whole += hit[0] >= 1.6 and len(q) > 1
             continue
         if 2 <= len(q) <= 3:
             letters = list(q)

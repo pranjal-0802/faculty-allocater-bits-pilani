@@ -16,13 +16,12 @@ from collections import defaultdict
 from pydantic import BaseModel
 
 from allocator.domain import (
-    IC_TARGET,
     Course,
     CourseCategory,
+    CourseLevel,
     Lock,
     LockMode,
     Person,
-    PersonKind,
     Preference,
     Problem,
     Section,
@@ -34,9 +33,8 @@ from allocator.ingest.template_spec import (
     COURSES,
     FACULTY,
     INSTRUCTIONS,
+    LEVELS,
     REQUIRED_SHEETS,
-    SCHOLAR_CATEGORIES,
-    SCHOLARS,
     SECTIONS,
     SHEETS,
     TEMPLATE_MARKER,
@@ -60,25 +58,22 @@ from allocator.ingest.xlsx_writer import (
 
 _CATEGORY_TO_DOMAIN = {
     "CDC": CourseCategory.CDC,
+    "C": CourseCategory.CDC,
     "EL": CourseCategory.ELECTIVE,
     "ELECTIVE": CourseCategory.ELECTIVE,
-    "HD": CourseCategory.HIGHER_DEGREE,
+    "DEL": CourseCategory.ELECTIVE,
+    "HEL": CourseCategory.ELECTIVE,
+    "D": CourseCategory.ELECTIVE,
+    "H": CourseCategory.ELECTIVE,
     "PROJECT": CourseCategory.PROJECT,
 }
 _CATEGORY_TO_TEMPLATE = {
     CourseCategory.CDC: "CDC",
     CourseCategory.ELECTIVE: "EL",
-    CourseCategory.HIGHER_DEGREE: "HD",
     CourseCategory.PROJECT: "PROJECT",
 }
 _PREF_COLUMN = re.compile(r"^(LECTURE|PRACTICAL|TUTORIAL) PREFERENCE (\d)$")
 _CONSEC_COLUMN = "{kind} TAKEN CONSECUTIVELY {rank}"
-_SCHOLAR_PREFS = {
-    "Tute-1": (SectionKind.TUTORIAL, 1),
-    "Tute-2": (SectionKind.TUTORIAL, 2),
-    "Practical-1": (SectionKind.PRACTICAL, 1),
-    "Practical-2": (SectionKind.PRACTICAL, 2),
-}
 _KIND_WORD = {SectionKind.LECTURE: "LECTURE", SectionKind.PRACTICAL: "PRACTICAL", SectionKind.TUTORIAL: "TUTORIAL"}
 _SLOTS = {SectionKind.LECTURE: 3, SectionKind.PRACTICAL: 2, SectionKind.TUTORIAL: 3}
 
@@ -164,19 +159,15 @@ def _lists_sheet() -> SheetData:
     sheet.set(1, 1, "Course choices")
     sheet.set(1, 2, "Yes/No")
     sheet.set(1, 3, "Categories")
-    sheet.set(1, 4, "Scholar categories")
-    sheet.set(1, 5, "People")
+    sheet.set(1, 4, "Levels")
     for r in range(2, _ROOM + 2):
         sheet.set(r, 1, Formula(f'IF(Courses!A{r}="","",Courses!A{r}&" - "&Courses!B{r})'))
     for i, v in enumerate(YES_NO, 2):
         sheet.set(i, 2, v)
     for i, v in enumerate(CATEGORIES, 2):
         sheet.set(i, 3, v)
-    for i, v in enumerate(SCHOLAR_CATEGORIES, 2):
+    for i, v in enumerate(LEVELS, 2):
         sheet.set(i, 4, v)
-    for r in range(2, _ROOM + 2):
-        sheet.set(r, 5, Formula(f'IF(Faculty!A{r}="","",Faculty!A{r})'))
-        sheet.set(_ROOM + r, 5, Formula(f"IF('Research Scholars'!A{r}=\"\",\"\",'Research Scholars'!A{r})"))
     return sheet
 
 
@@ -186,9 +177,8 @@ def _add_validations(sheets: list[SheetData], room: int) -> None:
         "course": ("Lists!$A$2:$A$%d" % (_ROOM + 1), "warning"),
         "yesno": ("Lists!$B$2:$B$3", "stop"),
         "category": ("Lists!$C$2:$C$%d" % (len(CATEGORIES) + 1), "stop"),
-        "scholar_category": ("Lists!$D$2:$D$%d" % (len(SCHOLAR_CATEGORIES) + 1), "warning"),
+        "level": ("Lists!$D$2:$D$%d" % (len(LEVELS) + 1), "stop"),
         "faculty": ("Faculty!$A$2:$A$%d" % (_ROOM + 1), "warning"),
-        "person": ("Lists!$E$2:$E$%d" % (2 * _ROOM + 1), "warning"),
     }
     for spec in SHEETS:
         sheet = by_name[spec.name]
@@ -207,25 +197,22 @@ def _rows_from_problem(problem: Problem) -> dict[str, list[list[object]]]:
     titles = {c.code: c.title for c in problem.courses}
     label = lambda code: f"{code} - {titles.get(code, '')}".rstrip(" -")  # noqa: E731
 
-    ic_locks = {l.course_code: people[l.person_id].name for l in problem.locks
-                if l.target == IC_TARGET and l.mode == LockMode.REQUIRE and l.person_id in people}
     section_locks: dict[tuple[str, str], list[str]] = defaultdict(list)
     for l in problem.locks:
-        if l.target != IC_TARGET and l.mode == LockMode.REQUIRE and l.person_id in people:
+        if l.mode == LockMode.REQUIRE and l.person_id in people:
             section_locks[(l.course_code, l.target)].append(people[l.person_id].name)
 
     courses = [
         [c.code, c.title, c.lecture_units or 0, c.lab_units or 0, (c.lecture_units or 0) + (c.lab_units or 0),
-         c.strength or None, _CATEGORY_TO_TEMPLATE[c.category], "Yes" if c.service else "No",
-         "Yes" if c.ic_required else "No", ic_locks.get(c.code), c.ic_units or None, None]
+         c.strength or None, _CATEGORY_TO_TEMPLATE[c.category], c.level.value, "Yes" if c.service else "No",
+         c.category_source or None]
         for c in problem.courses
     ]
     sections = []
     for c in problem.courses:
         for s in c.sections:
-            scholars = str(s.scholar_max) if s.scholar_min == s.scholar_max else f"{s.scholar_min}-{s.scholar_max}"
             fixed = section_locks.get((c.code, s.id), [])[:3]
-            sections.append([c.code, s.id, s.faculty_max, scholars, *(fixed + [None] * (3 - len(fixed))), None, None])
+            sections.append([c.code, s.id, s.faculty_max, *(fixed + [None] * (3 - len(fixed))), None, None])
 
     prefs: dict[str, list[Preference]] = defaultdict(list)
     for p in problem.preferences:
@@ -244,35 +231,35 @@ def _rows_from_problem(problem: Problem) -> dict[str, list[list[object]]]:
                 chosen.append(p)
         return chosen[:slots], chosen[slots:]
 
-    faculty, scholars = [], []
+    faculty = []
     for person in problem.people:
-        if person.kind == PersonKind.FACULTY:
-            cells, extra = [], []
-            for kind in (SectionKind.LECTURE, SectionKind.PRACTICAL, SectionKind.TUTORIAL):
-                kept, overflow = ordered(person.id, kind, _SLOTS[kind])
-                extra += [f"{label(p.course_code)} ({kind.value})" for p in overflow]
-                for i in range(_SLOTS[kind]):
-                    p = kept[i] if i < len(kept) else None
-                    cells.append(label(p.course_code) if p else None)
-                    cells.append(None if not p or p.taught_consecutively is None
-                                 else ("Yes" if p.taught_consecutively else "No"))
-            extra += [f"{label(p.course_code)} (any part)" for p in prefs.get(person.id, []) if p.kind is None]
-            faculty.append([
-                person.name, person.psrn, person.email, person.designation, person.teaching_percent,
-                person.load_min, person.load_max, person.external_load or 0,
-                "; ".join(person.external_notes) or None, *cells,
-                ("Also wants: " + "; ".join(extra)) if extra else None,
-            ])
-        else:
-            tutes, _ = ordered(person.id, SectionKind.TUTORIAL, 2)
-            pracs, _ = ordered(person.id, SectionKind.PRACTICAL, 2)
-            pick = lambda xs, i: label(xs[i].course_code) if i < len(xs) else None  # noqa: E731
-            supervisor = people[person.supervisor].name if person.supervisor in people else None
-            scholars.append([
-                person.name, person.email, person.category, supervisor, person.load_max,
-                pick(tutes, 0), pick(tutes, 1), pick(pracs, 0), pick(pracs, 1), None,
-            ])
-    return {COURSES.name: courses, SECTIONS.name: sections, FACULTY.name: faculty, SCHOLARS.name: scholars}
+        cells, extra = [], []
+        for kind in (SectionKind.LECTURE, SectionKind.PRACTICAL, SectionKind.TUTORIAL):
+            kept, overflow = ordered(person.id, kind, _SLOTS[kind])
+            extra += [f"{label(p.course_code)} ({kind.value})" for p in overflow]
+            for i in range(_SLOTS[kind]):
+                p = kept[i] if i < len(kept) else None
+                cells.append(label(p.course_code) if p else None)
+                cells.append(_consecutive_cell(p))
+        extra += [f"{label(p.course_code)} (any part)" for p in prefs.get(person.id, []) if p.kind is None]
+        faculty.append([
+            person.name, person.psrn, person.email, person.designation, person.teaching_percent,
+            person.load_min, person.load_max, person.external_load or 0,
+            "; ".join(person.external_notes) or None, *cells,
+            ("Also wants: " + "; ".join(extra)) if extra else None,
+        ])
+    return {COURSES.name: courses, SECTIONS.name: sections, FACULTY.name: faculty}
+
+
+def _consecutive_cell(p: Preference | None) -> object:
+    """A count when one is known; otherwise the old form's Yes/No."""
+    if p is None:
+        return None
+    if p.consecutive_count is not None:
+        return p.consecutive_count
+    if p.taught_consecutively is None:
+        return None
+    return "Yes" if p.taught_consecutively else "No"
 
 
 # ============================================================================
@@ -367,6 +354,30 @@ class _Reader:
             self.error(sheet, row, column.header, f"{text!r} is not a number.")
             return None
 
+    def consecutive(self, sheet: str, row: int, column: Column, text: str) -> tuple[int | None, bool | None]:
+        """
+        "Taken Consecutively": a count of semesters in a row, or the old
+        form's Yes/No. Returns (count, taught consecutively).
+        """
+        text = (text or "").strip().upper()
+        if not text:
+            return None, None
+        try:
+            value = float(text)
+        except ValueError:
+            value = None
+        if value is not None:
+            if value < 0 or not value.is_integer():
+                self.error(sheet, row, column.header, f"{text!r}: write a whole number of semesters (0, 1, 2...).")
+                return None, None
+            return int(value), value > 0
+        if text in ("Y", "YES", "TRUE"):
+            return None, True
+        if text in ("N", "NO", "FALSE"):
+            return 0, False
+        self.error(sheet, row, column.header, f"{text!r}: write the number of semesters in a row (0, 1, 2, 3...).")
+        return None, None
+
     def yesno(self, sheet: str, row: int, column: Column, text: str) -> bool | None:
         text = (text or column.default or "").strip().upper()
         if not text:
@@ -392,10 +403,10 @@ def read_template(data: bytes | str, department: str = "", name: str = "", semes
 
     courses = _read_courses(r)
     _read_sections(r, courses)
-    people, prefs, roster = _read_faculty(r, courses)
-    scholar_people, scholar_prefs = _read_scholars(r, courses, roster)
-    people.update(scholar_people)
-    prefs += scholar_prefs
+    people, prefs = _read_faculty(r, courses)
+    if "Research Scholars" in sheets:
+        r.warn("Research Scholars", None, None,
+               "Research scholars are not part of the faculty allocation; this sheet is ignored.")
     locks = _read_locks(r, courses, people)
 
     errors = [i for i in r.issues if i.severity == "error"]
@@ -431,11 +442,23 @@ def _read_courses(r: _Reader) -> dict[str, Course]:
         title = v.get("Course Title", "")
         if not title:
             r.error(spec.name, row, "Course Title", "Title is required.")
-        category_text = (v.get("Category") or "CDC").upper()
+        category_text = (v.get("Category") or "").upper()
         category = _CATEGORY_TO_DOMAIN.get(category_text)
-        if category is None:
+        if not category_text:
+            r.error(spec.name, row, "Category", "Say whether the course is a CDC, an elective (EL) or a PROJECT.")
+            category = CourseCategory.CDC
+        elif category_text == "HD":
+            r.error(spec.name, row, "Category",
+                    "HD is a level, not a category: write CDC or EL here, and HD in the Level column.")
+            category = CourseCategory.CDC
+        elif category is None:
             r.error(spec.name, row, "Category", f"{category_text!r}: use one of {', '.join(CATEGORIES)}.")
             category = CourseCategory.CDC
+        level_text = (v.get("Level") or "").upper()
+        if level_text and level_text not in LEVELS:
+            r.error(spec.name, row, "Level", f"{level_text!r}: use FD or HD.")
+        level = CourseLevel(level_text) if level_text in LEVELS else (
+            CourseLevel.HD if re.match(r"^\S+ G", code) else CourseLevel.FD)
         lec = r.number(spec.name, row, _col(spec, "L"), v.get("L", "")) or 0.0
         lab = r.number(spec.name, row, _col(spec, "P"), v.get("P", "")) or 0.0
         total = r.number(spec.name, row, _col(spec, "U"), v.get("U", ""))
@@ -443,32 +466,21 @@ def _read_courses(r: _Reader) -> dict[str, Course]:
             r.warn(spec.name, row, "U", f"U is {total:g} but L + P is {lec + lab:g}; L and P are used.")
         strength = r.number(spec.name, row, _col(spec, "Strength"), v.get("Strength", ""))
         service = r.yesno(spec.name, row, _col(spec, "Service Course"), v.get("Service Course", ""))
-        ic_required = r.yesno(spec.name, row, _col(spec, "IC Required"), v.get("IC Required", ""))
-        ic_units = r.number(spec.name, row, _col(spec, "IC Units"), v.get("IC Units", ""))
         courses[code] = Course(
             code=code,
             title=title,
             category=category,
+            level=level,
+            category_source="department upload",
             lecture_units=lec,
             lab_units=lab,
             strength=int(strength or 0),
             service=bool(service) or category == CourseCategory.PROJECT,
-            ic_required=True if ic_required is None else ic_required,
-            ic_units=ic_units if ic_units is not None else (1.0 if category == CourseCategory.PROJECT else 0.0),
         )
         r.course_rows[code] = row
     if not courses:
         r.error(spec.name, None, None, "No courses listed.")
     return courses
-
-
-def _parse_range(text: str) -> tuple[int, int] | None:
-    m = re.fullmatch(r"\s*(\d+)\s*(?:-\s*(\d+))?\s*", text)
-    if not m:
-        return None
-    lo = int(m.group(1))
-    hi = int(m.group(2)) if m.group(2) else lo
-    return (lo, hi) if lo <= hi else None
 
 
 def _read_sections(r: _Reader, courses: dict[str, Course]) -> None:
@@ -492,18 +504,9 @@ def _read_sections(r: _Reader, courses: dict[str, Course]) -> None:
             continue
         faculty = r.number(spec.name, row, _col(spec, "Faculty Needed"), v.get("Faculty Needed", ""))
         faculty_n = int(faculty if faculty is not None else 1)
-        scholars_text = v.get("Scholars Needed", "")
-        if scholars_text:
-            span = _parse_range(scholars_text)
-            if span is None:
-                r.error(spec.name, row, "Scholars Needed", f"{scholars_text!r}: write a number or a range like 1-2.")
-                span = (0, 0)
-        else:
-            span = (0, 0) if kind == SectionKind.LECTURE else (1, 1)
-        if kind == SectionKind.LECTURE and span[1] > 0:
-            r.warn(spec.name, row, "Scholars Needed", "Scholars on a lecture section are unusual; check this is intended.")
-        if kind == SectionKind.LECTURE and faculty_n < 1:
-            r.error(spec.name, row, "Faculty Needed", "A lecture section needs at least one faculty member.")
+        if faculty_n < 0:
+            r.error(spec.name, row, "Faculty Needed", "Cannot be negative.")
+            faculty_n = 0
         if kind == SectionKind.PRACTICAL and not course.lab_units:
             r.warn(spec.name, row, "Section Number", f"{code} has a practical section but no lab units (P) on the Courses sheet.")
         if kind == SectionKind.LECTURE and not course.lecture_units:
@@ -511,13 +514,12 @@ def _read_sections(r: _Reader, courses: dict[str, Course]) -> None:
         course.sections.append(Section(
             id=sid, kind=kind,
             faculty_min=faculty_n, faculty_max=faculty_n,
-            scholar_min=span[0], scholar_max=span[1],
         ))
         r.section_meta[(code, sid)] = (row, [v.get(f"Pre-assigned Instructor {i}", "") for i in (1, 2, 3)])
     for course in courses.values():
         if not course.sections and course.category != CourseCategory.PROJECT:
             r.warn(COURSES.name, r.course_rows.get(course.code), "Course Number",
-                   f"{course.code} has no rows on the Sections sheet; only its IC will be chosen.")
+                   f"{course.code} has no rows on the Sections sheet; nothing to staff.")
 
 
 def _resolve_course(r: _Reader, sheet: str, row: int, column: str, text: str, courses: dict[str, Course]) -> str | None:
@@ -565,7 +567,7 @@ def _read_faculty(r: _Reader, courses: dict[str, Course]):
         if lo is not None and hi is not None and lo > hi:
             r.error(spec.name, row, "Min Load", f"Min Load {lo:g} is above Max Load {hi:g}.")
         people[pid] = Person(
-            id=pid, name=name, kind=PersonKind.FACULTY, psrn=psrn,
+            id=pid, name=name, psrn=psrn,
             email=v.get("Email") or None, designation=v.get("Designation") or None,
             teaching_percent=r.number(spec.name, row, _col(spec, "Teaching Allocation"), v.get("Teaching Allocation", "")),
             load_min=lo, load_max=hi, external_load=external,
@@ -586,50 +588,12 @@ def _read_faculty(r: _Reader, courses: dict[str, Course]):
                 continue
             seen.add((code, kind))
             consec_header = f"{m.group(1)} Taken Consecutively {rank}"
-            consec = r.yesno(spec.name, row, _col(spec, consec_header), v.get(consec_header, ""))
+            count, consec = r.consecutive(spec.name, row, _col(spec, consec_header), v.get(consec_header, ""))
             prefs.append(Preference(person_id=pid, course_code=code, kind=kind, rank=rank,
-                                    taught_consecutively=consec, source="faculty sheet"))
+                                    consecutive_count=count, taught_consecutively=consec,
+                                    source="faculty sheet"))
     if not people:
         r.error(spec.name, None, None, "No faculty listed.")
-    roster = NameMatcher([(p.id, p.name, []) for p in people.values()])
-    return people, prefs, roster
-
-
-def _read_scholars(r: _Reader, courses: dict[str, Course], faculty: NameMatcher):
-    from allocator.ingest.workbook import slug
-
-    spec = SCHOLARS
-    people: dict[str, Person] = {}
-    prefs: list[Preference] = []
-    for row, v in r.rows(spec):
-        name = v.get("Name", "")
-        if not name:
-            r.error(spec.name, row, "Name", "Name is required.")
-            continue
-        pid = "s-" + slug(name)
-        if pid in people:
-            r.error(spec.name, row, "Name", f"{name} is listed twice.")
-            continue
-        supervisor = None
-        sup_text = v.get("Supervisor's Name", "")
-        if sup_text:
-            supervisor = _exact_or_matched(faculty, sup_text)
-            if supervisor is None:
-                r.warn(spec.name, row, "Supervisor's Name", f"{sup_text!r} is not on the Faculty sheet; supervisor left blank.")
-        people[pid] = Person(
-            id=pid, name=name, kind=PersonKind.SCHOLAR,
-            email=v.get("Email Address") or None,
-            category=v.get("I am ______ in the next semester") or None,
-            supervisor=supervisor,
-            load_max=r.number(spec.name, row, _col(spec, "Max Hours"), v.get("Max Hours", "")),
-        )
-        seen: set[tuple[str, SectionKind]] = set()
-        for header, (kind, rank) in _SCHOLAR_PREFS.items():
-            code = _resolve_course(r, spec.name, row, header, v.get(header, ""), courses)
-            if not code or (code, kind) in seen:
-                continue
-            seen.add((code, kind))
-            prefs.append(Preference(person_id=pid, course_code=code, kind=kind, rank=rank, source="scholar sheet"))
     return people, prefs
 
 
@@ -642,44 +606,24 @@ def _exact_or_matched(matcher: NameMatcher, text: str) -> str | None:
 
 
 def _read_locks(r: _Reader, courses: dict[str, Course], people: dict[str, Person]) -> list[Lock]:
-    matcher = NameMatcher([(p.id, p.name, []) for p in people.values()])
-    faculty = NameMatcher([(p.id, p.name, []) for p in people.values() if p.kind == PersonKind.FACULTY])
+    faculty = NameMatcher([(p.id, p.name, []) for p in people.values()])
     locks: list[Lock] = []
-
-    sheet = r.sheets.get(COURSES.name)
-    if sheet is not None:
-        for row, v in r.rows(COURSES):
-            code = extract_code(v.get("Course Number", ""))
-            text = v.get("Pre-assigned IC", "")
-            if not code or code not in courses or not text:
-                continue
-            pid = _exact_or_matched(faculty, text)
-            if pid is None:
-                r.error(COURSES.name, row, "Pre-assigned IC", f"{text!r} is not on the Faculty sheet.")
-                continue
-            locks.append(Lock(person_id=pid, course_code=code, target=IC_TARGET, note="pre-assigned on upload"))
 
     for course in courses.values():
         for section in course.sections:
             row, names = r.section_meta.get((course.code, section.id), (None, []))
-            n_fac = n_sch = 0
+            n_fac = 0
             for i, text in enumerate(names, 1):
                 if not text:
                     continue
-                pid = _exact_or_matched(matcher, text)
+                pid = _exact_or_matched(faculty, text)
                 column = f"Pre-assigned Instructor {i}"
                 if pid is None:
-                    r.error(SECTIONS.name, row, column, f"{text!r} is not on the Faculty or Research Scholars sheet.")
+                    r.error(SECTIONS.name, row, column, f"{text!r} is not on the Faculty sheet.")
                     continue
-                if people[pid].kind == PersonKind.FACULTY:
-                    n_fac += 1
-                else:
-                    n_sch += 1
+                n_fac += 1
                 locks.append(Lock(person_id=pid, course_code=course.code, target=section.id, note="pre-assigned on upload"))
             if n_fac > section.faculty_max:
                 r.error(SECTIONS.name, row, "Faculty Needed",
                         f"{n_fac} faculty are pre-assigned but Faculty Needed is {section.faculty_max}.")
-            if n_sch > section.scholar_max:
-                r.error(SECTIONS.name, row, "Scholars Needed",
-                        f"{n_sch} scholars are pre-assigned but Scholars Needed allows {section.scholar_max}.")
     return locks

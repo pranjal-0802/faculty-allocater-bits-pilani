@@ -4,7 +4,7 @@ Objective: one weighted sum, maximised.
 Preference rewards are paid once per (person, course, kind), not once per
 section. Paying per section would let the solver please someone by handing
 them every section of their favourite course, which is the opposite of what a
-department wants; load is governed by the load band instead.
+department wants; load is governed by the person's target instead.
 
 Load terms are in scaled units (see SCALE), so their weights are per tenth of
 a unit; every other term is multiplied by SCALE to match. A weight in the
@@ -16,8 +16,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from allocator.domain import PersonKind, SectionKind
-from allocator.load import load_band
+from allocator.domain import SectionKind
 from allocator.settings import RuleMode
 from allocator.solver.context import SCALE, ModelContext, scaled
 
@@ -34,8 +33,7 @@ class ObjectiveBuilder:
 
     def build(self) -> None:
         self._preferences()
-        self._supervisor()
-        self._load_band()
+        self._load_target()
         self._tutorial_follows_lecture_soft()
         self._lecturer_takes_tutorial()
         self._distinct_courses()
@@ -48,61 +46,41 @@ class ObjectiveBuilder:
     # ---- preferences --------------------------------------------------------
 
     def _preferences(self) -> None:
+        weights = self.s.rank_weights
         for (pid, code, kind), var in self.ctx.teaches.items():
-            person = self.ctx.people[pid]
             course = self.ctx.courses[code]
-            weights = (
-                self.s.faculty_rank_weights
-                if person.kind == PersonKind.FACULTY
-                else self.s.scholar_rank_weights
-            )
             prefs = self.ctx.prefs.get((pid, code), [])
             exact = [p for p in prefs if p.kind in (kind, None)]
 
             if exact:
-                best = min(exact, key=lambda p: p.rank)
-                reward = weights.get(best.rank, min(weights.values(), default=0))
+                rank = min(p.rank for p in exact)
+                reward = weights.get(rank, min(weights.values(), default=0))
                 self.groups["preference"].append((var, SCALE * reward))
-                if best.taught_consecutively and self.s.consecutive_weight:
-                    self.groups["consecutive"].append(
-                        (var, SCALE * self.s.consecutive_weight)
-                    )
             elif prefs:
                 self.groups["preference"].append((var, SCALE * self.s.cross_kind_weight))
             else:
                 penalty = (
-                    self.s.unlisted_service_penalty
-                    if course.service
-                    else self.s.unlisted_penalty
+                    self.s.unlisted_service_penalty if course.service else self.s.unlisted_penalty
                 )
                 if penalty:
                     self.groups["unlisted"].append((var, -SCALE * penalty))
 
-    def _supervisor(self) -> None:
-        if not self.s.supervisor_bonus:
-            return
-        for (pid, code, sid), var in self.ctx.x.items():
-            person = self.ctx.people[pid]
-            if person.kind != PersonKind.SCHOLAR or not person.supervisor:
-                continue
-            boss = self.ctx.x.get((person.supervisor, code, sid))
-            if boss is None:
-                continue
-            together = self.model.NewBoolVar(f"with_supervisor|{pid}|{code}|{sid}")
-            self.model.AddImplication(together, var)
-            self.model.AddImplication(together, boss)
-            self.groups["supervisor"].append((together, SCALE * self.s.supervisor_bonus))
-
     # ---- load ---------------------------------------------------------------
 
-    def _load_band(self) -> None:
-        worst = {
-            PersonKind.FACULTY: self.model.NewIntVar(0, 10**6, "max_overload|faculty"),
-            PersonKind.SCHOLAR: self.model.NewIntVar(0, 10**6, "max_overload|scholar"),
-        }
+    def _load_target(self) -> None:
+        """
+        Keep each person inside their band: [target - tolerance, target].
+
+        The target is a ceiling ("try not to violate"), so going over it costs
+        far more than falling short. Overload past `overload_steep_after`
+        costs more again, and the single worst overload costs extra, so that
+        when the targets add up to less than the work (most people opt for
+        under 50%) the excess is shared out instead of piled on a few.
+        """
+        steep_after = scaled(self.s.overload_steep_after)
+        worst = self.model.NewIntVar(0, 10**6, "max_overload")
         for pid, load in self.ctx.load.items():
-            person = self.ctx.people[pid]
-            band = load_band(person, self.s)
+            band = self.ctx.band(pid)
             lo, hi = scaled(band.min), scaled(band.max)
 
             under = self.model.NewIntVar(0, max(lo, 0), f"under|{pid}")
@@ -111,13 +89,15 @@ class ObjectiveBuilder:
             # to the true shortfall or excess on its own.
             self.model.Add(under >= lo - load)
             self.model.Add(over >= load - hi)
-            self.model.Add(worst[person.kind] >= over)
+            self.model.Add(worst >= over)
+            if self.s.overload_steep_penalty:
+                steep = self.model.NewIntVar(0, 10**6, f"steep_over|{pid}")
+                self.model.Add(steep >= over - steep_after)
+                self.groups["overload"].append((steep, -self.s.overload_steep_penalty))
 
             self.groups["underload"].append((under, -self.s.underload_penalty))
             self.groups["overload"].append((over, -self.s.overload_penalty))
-
-        for var in worst.values():
-            self.groups["max_overload"].append((var, -self.s.max_overload_penalty))
+        self.groups["max_overload"].append((worst, -self.s.max_overload_penalty))
 
     # ---- structure ----------------------------------------------------------
 
@@ -126,7 +106,7 @@ class ObjectiveBuilder:
             return
         for (pid, code, sid), var in self.ctx.x.items():
             course = self.ctx.courses[code]
-            if course.service or self.ctx.people[pid].kind != PersonKind.FACULTY:
+            if course.service:
                 continue
             section = next(s for s in course.sections if s.id == sid)
             if section.kind != SectionKind.TUTORIAL:
@@ -152,8 +132,7 @@ class ObjectiveBuilder:
             if course.service:
                 continue
             has_tutorial_slots = any(
-                s.kind == SectionKind.TUTORIAL and s.faculty_max > 0
-                for s in course.sections
+                s.kind == SectionKind.TUTORIAL and s.faculty_max > 0 for s in course.sections
             )
             if not has_tutorial_slots:
                 continue
@@ -177,22 +156,20 @@ class ObjectiveBuilder:
                 )
 
     def _distinct_courses(self) -> None:
-        limit = self.s.faculty_max_courses
+        limit = self.s.max_courses
         if limit <= 0 or not self.s.extra_course_penalty:
             return
         by_person: dict[str, list] = defaultdict(list)
         for (pid, _), var in self.ctx.in_course.items():
-            if self.ctx.people[pid].kind == PersonKind.FACULTY:
-                by_person[pid].append(var)
+            by_person[pid].append(var)
         for pid, vars_ in by_person.items():
             if len(vars_) <= limit:
                 continue
             extra = self.model.NewIntVar(0, len(vars_), f"extra_courses|{pid}")
             self.model.Add(extra >= sum(vars_) - limit)
-            self.groups["extra_courses"].append(
-                (extra, -SCALE * self.s.extra_course_penalty)
-            )
+            self.groups["extra_courses"].append((extra, -SCALE * self.s.extra_course_penalty))
 
     def _unfilled(self) -> None:
         for var in self.ctx.unfilled.values():
             self.groups["unfilled"].append((var, -SCALE * self.s.unfilled_penalty))
+

@@ -6,10 +6,14 @@ have (Mechanical, Sem II 2025-26) carries, on separate sheets:
 
 * the faculty preference form: three lecture, two practical and three
   tutorial choices each, with "taken consecutively" flags;
-* the research-scholar form: two tutorial and two practical choices each;
 * the section-level allocation the department made by hand (who took L1, T3,
-  P7...), which also tells us which sections exist and how they are staffed;
-* a course / IC summary.
+  P7...), which also tells us which sections exist and how many faculty
+  each one has;
+* a course summary (CDC / EL, FD / HD).
+
+It also has a research-scholar form (the RS sheet). Scholars are not part of
+the faculty allocation, so that sheet is not read, and scholars named on the
+section sheet are left out of both the sections and the hand allocation.
 
 Sheets are found by their header text, not their names, so a renamed tab
 still imports. Inputs to the solver come only from the forms and the shape of
@@ -26,13 +30,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from allocator.domain import (
-    IC_TARGET,
     Allocation,
     Assignment,
     Course,
     CourseCategory,
+    CourseLevel,
     Person,
-    PersonKind,
     Preference,
     Problem,
     Section,
@@ -60,7 +63,7 @@ class ImportOptions:
     department: str = "ME"
     name: str = ""
     semester: str = ""
-    #: Derive each section's staffing (how many faculty and scholars) from the
+    #: Derive each section's staffing (how many faculty) from the
     #: department's own allocation. That is the department's decision about
     #: the shape of the work, not about who does it. When False, sections get
     #: the default templates instead.
@@ -77,7 +80,17 @@ class _Builder:
     courses: dict[str, Course] = field(default_factory=dict)
     preferences: list[Preference] = field(default_factory=list)
     reference: list[Assignment] = field(default_factory=list)
-    #: (person id, text, kind, rank, consecutive, source): preference text,
+    #: Section-sheet names that are not department faculty (scholars,
+    #: other departments' staff), counted for one summary note.
+    outsiders: set[str] = field(default_factory=set)
+    #: Sections the department staffed with no faculty at all.
+    no_faculty: list[str] = field(default_factory=list)
+    #: Course -> programmes that take it as a CDC / as an elective, from the
+    #: department's programme sheets.
+    cdc_for: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
+    el_for: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
+
+    #: (person id, text, kind, rank, (count, consecutive), source): preference text,
     #: resolved to course codes once every course is known.
     raw_prefs: list[tuple] = field(default_factory=list)
 
@@ -122,7 +135,6 @@ def import_workbook(source: bytes | str, options: ImportOptions | None = None) -
     b = _Builder(options=options, config=config)
 
     faculty_form = _find_sheet(sheets, "FACULTY NAME", "LECTURE PREFERENCE")
-    scholar_form = _find_sheet(sheets, "TUTE-1", "PRACTICAL-1")
     section_sheet = _find_sheet(sheets, "COURSE NUMBER", "SECTION NUMBER")
     load_sheet = _find_sheet(sheets, "FACULTY NAME", "LECTURE  1") or _find_sheet(
         sheets, "FACULTY NAME", "LECTURE 1"
@@ -143,23 +155,33 @@ def import_workbook(source: bytes | str, options: ImportOptions | None = None) -
     _read_faculty(b, *faculty_form)
     if load_sheet:
         _read_extra_faculty(b, *load_sheet)
-    if scholar_form:
-        _read_scholars(b, *scholar_form)
-    else:
-        b.note("No research-scholar form found; only faculty will be allocated.")
 
     resolver = CourseResolver({}, config.get("course_aliases", {}))
     _read_sections(b, *section_sheet, resolver)
     if ic_sheet:
         _read_ic_summary(b, ic_sheet, resolver)
+    _read_programme_sheets(b, sheets)
     _add_projects(b)
     _resolve_preferences(b, resolver)
     _finalise_courses(b)
+    if b.outsiders:
+        sample = ", ".join(sorted(b.outsiders)[:8])
+        b.note(
+            f"{len(b.outsiders)} name(s) on the section sheet are not department faculty "
+            f"(research scholars, or staff of other departments) and are left out: {sample}"
+            f"{'...' if len(b.outsiders) > 8 else ''}."
+        )
+    if b.no_faculty:
+        b.note(
+            f"{len(b.no_faculty)} section(s) had no faculty in the department's allocation "
+            f"(scholar-only); they are listed with no faculty needed: {', '.join(b.no_faculty[:10])}"
+            f"{'...' if len(b.no_faculty) > 10 else ''}."
+        )
 
     department = config.get("department", options.department.upper())
     name = options.name or f"{department} allocation"
     problem_id = slug(f"{department}-{options.semester or 'semester'}-{name}")[:60]
-    return Problem(
+    problem = Problem(
         id=problem_id,
         name=name,
         department=department,
@@ -170,6 +192,7 @@ def import_workbook(source: bytes | str, options: ImportOptions | None = None) -
         reference=Allocation(assignments=b.reference),
         notes=b.notes,
     )
+    return problem
 
 
 # ---- faculty -----------------------------------------------------------------------
@@ -202,7 +225,6 @@ def _read_faculty(b: _Builder, sheet: Sheet, header_row: int) -> None:
         person = Person(
             id=pid,
             name=name,
-            kind=PersonKind.FACULTY,
             department=b.config.get("department", ""),
             teaching_percent=_number(sheet.get(row, percent_col)) if percent_col else None,
         )
@@ -214,8 +236,7 @@ def _read_faculty(b: _Builder, sheet: Sheet, header_row: int) -> None:
                 continue
             flag_col = consec_cols.get((kind, rank))
             flag = (sheet.get(row, flag_col) or "").strip().upper() if flag_col else ""
-            consecutive = True if flag == "YES" else False if flag == "NO" else None
-            b.raw_prefs.append((pid, text, kind, rank, consecutive, "faculty form"))
+            b.raw_prefs.append((pid, text, kind, rank, _consecutive(flag), "faculty form"))
 
         if extra_col:
             _read_additional(b, person, sheet.get(row, extra_col) or "")
@@ -264,14 +285,37 @@ def _read_additional(b: _Builder, person: Person, text: str) -> None:
         entries.append((part, _kinds_in(part)))
     for course_text, kinds in entries:
         for kind in kinds:
-            b.raw_prefs.append((person.id, course_text, kind, 1, None, "additional"))
+            b.raw_prefs.append((person.id, course_text, kind, 1, (None, None), "additional"))
 
 
-def _add_wilp(b: _Builder, person: Person, source: str) -> None:
-    units = float(b.config.get("wilp_units", 3))
-    if any("WILP" in n for n in person.external_notes):
-        return
-    person.external_load += units
+def _consecutive(flag: str) -> tuple[int | None, bool | None]:
+    """
+    "Taken Consecutively": the ME form records Yes/No, newer forms a count.
+    Returns (count, taught consecutively). A bare Yes has no count.
+    """
+    if not flag:
+        return None, None
+    number = _number(flag)
+    if number is not None and number >= 0:
+        return int(number), number > 0
+    if flag in ("YES", "Y"):
+        return None, True
+    if flag in ("NO", "N"):
+        return 0, False
+    return None, None
+
+
+def _add_wilp(b: _Builder, person: Person, source: str, share: int = 1) -> None:
+    units = round(float(b.config.get("wilp_units", 3)) / max(1, share), 3)
+    old = next((i for i, n in enumerate(person.external_notes) if "WILP" in n), None)
+    if old is not None:
+        # Seen already (the form's WILP column and the section sheet name the
+        # same course): keep the more specific record, from the section sheet.
+        if "section sheet" not in source:
+            return
+        person.external_load -= float(re.search(r"\(([\d.]+) units", person.external_notes[old]).group(1))
+        person.external_notes.pop(old)
+    person.external_load = round(person.external_load + units, 3)
     person.external_notes.append(f"WILP ({units:g} units, from {source})")
 
 
@@ -291,66 +335,9 @@ def _read_extra_faculty(b: _Builder, sheet: Sheet, header_row: int) -> None:
         clean = re.sub(r"^(Prof\.|Dr\.)\s*", "", name).strip()
         pid = "f-" + slug(clean)
         b.people[pid] = Person(
-            id=pid, name=clean, kind=PersonKind.FACULTY, department=b.config.get("department", "")
+            id=pid, name=clean, department=b.config.get("department", "")
         )
         b.note(f"{clean} is on the load sheet but did not fill in the preference form.")
-
-
-# ---- scholars ----------------------------------------------------------------------
-
-
-def _read_scholars(b: _Builder, sheet: Sheet, header_row: int) -> None:
-    header = {c: v.upper() for c, v in _header(sheet, header_row).items()}
-
-    def col(*needles: str) -> int | None:
-        return next((c for c, v in header.items() if all(n in v for n in needles)), None)
-
-    name_col = col("NAME") if col("NAME") != col("SUPERVISOR") else None
-    name_col = next(
-        (c for c, v in header.items() if v.strip() == "NAME"), name_col
-    )
-    email_col = col("EMAIL")
-    category_col = col("I AM")
-    supervisor_col = col("SUPERVISOR")
-    pref_cols = {
-        col("TUTE-1"): (SectionKind.TUTORIAL, 1),
-        col("TUTE-2"): (SectionKind.TUTORIAL, 2),
-        col("PRACTICAL-1"): (SectionKind.PRACTICAL, 1),
-        col("PRACTICAL-2"): (SectionKind.PRACTICAL, 2),
-    }
-    pref_cols.pop(None, None)
-    faculty = _faculty_matcher(b)
-
-    for row in sheet.rows():
-        if row <= header_row:
-            continue
-        name = (sheet.get(row, name_col) or "").strip() if name_col else ""
-        if not name:
-            continue
-        pid = "s-" + slug(name)
-        if pid in b.people:
-            continue
-        supervisor_text = (sheet.get(row, supervisor_col) or "") if supervisor_col else ""
-        supervisor = faculty.match(supervisor_text) if supervisor_text else None
-        if supervisor_text and not supervisor:
-            b.note(f"Supervisor {supervisor_text.strip()!r} of scholar {name} not matched to a faculty member.")
-        b.people[pid] = Person(
-            id=pid,
-            name=name,
-            kind=PersonKind.SCHOLAR,
-            department=b.config.get("department", ""),
-            email=(sheet.get(row, email_col) or None) if email_col else None,
-            category=(sheet.get(row, category_col) or None) if category_col else None,
-            supervisor=supervisor,
-        )
-        has_prefs = False
-        for c, (kind, rank) in pref_cols.items():
-            text = sheet.get(row, c)
-            if text and len(text.strip()) > 1:
-                b.raw_prefs.append((pid, text, kind, rank, None, "scholar form"))
-                has_prefs = True
-        if not has_prefs:
-            b.note(f"Scholar {name} has no preferences on the form.")
 
 
 # ---- sections (demand + reference) -------------------------------------------------------
@@ -358,14 +345,7 @@ def _read_scholars(b: _Builder, sheet: Sheet, header_row: int) -> None:
 
 def _faculty_matcher(b: _Builder) -> NameMatcher:
     return NameMatcher(
-        [(p.id, p.name, p.aliases) for p in b.people.values() if p.kind == PersonKind.FACULTY],
-        b.config.get("name_aliases", {}),
-    )
-
-
-def _scholar_matcher(b: _Builder) -> NameMatcher:
-    return NameMatcher(
-        [(p.id, p.name, p.aliases) for p in b.people.values() if p.kind == PersonKind.SCHOLAR],
+        [(p.id, p.name, p.aliases) for p in b.people.values()],
         b.config.get("name_aliases", {}),
     )
 
@@ -380,7 +360,6 @@ def _section_id(text: str) -> tuple[str, SectionKind] | None:
 @dataclass
 class _Staff:
     faculty: list[tuple[str, str]] = field(default_factory=list)  # (pid, note)
-    scholars: list[tuple[str, str]] = field(default_factory=list)
     external: list[str] = field(default_factory=list)
 
 
@@ -398,9 +377,9 @@ def _looks_like_person(text: str) -> bool:
 
 
 def _classify_staff(b: _Builder, texts: list[str]) -> _Staff:
-    """Sort one row's instructor cells into faculty, scholars and outsiders."""
+    """Sort one row's instructor cells into department faculty and outsiders."""
     staff = _Staff()
-    faculty, scholars = _faculty_matcher(b), _scholar_matcher(b)
+    faculty = _faculty_matcher(b)
     placeholders = {normalise(p) for p in b.config.get("placeholder_staff", [])}
     for raw in texts:
         for text in re.split(r"\n", raw):
@@ -411,22 +390,12 @@ def _classify_staff(b: _Builder, texts: list[str]) -> _Staff:
             if normalise(text) in placeholders:
                 staff.external.append(text)
                 continue
-            f, s = faculty.match(text), scholars.match(text)
-            if f and s:
-                # Both rosters claim it: trust the better score.
-                if faculty.best_score(text) >= scholars.best_score(text):
-                    s = None
-                else:
-                    f = None
+            f = faculty.match(text)
             if f:
                 staff.faculty.append((f, note))
-            elif s:
-                staff.scholars.append((s, note))
-            elif not _looks_like_person(text):
-                continue
-            else:
+            elif _looks_like_person(text):
                 staff.external.append(text)
-                b.note(f"Section staff {text!r} matched nobody in the department; kept as external.")
+                b.outsiders.add(text)
     return staff
 
 
@@ -483,17 +452,10 @@ def _read_sections(b: _Builder, sheet: Sheet, header_row: int, resolver: CourseR
         staff_texts = [sheet.get(row, c) or "" for c in range(first_staff, last_staff + 1)]
 
         if section_text.upper() == "IC":
-            staff = _classify_staff(b, staff_texts)
-            for pid, _ in staff.faculty[:1]:
-                _add_reference(b, pid, current, IC_TARGET)
-            continue
+            continue  # ICs are out of scope
 
         parsed = _section_id(section_text) if section_text else None
         if parsed is None:
-            if not section_text and current in b.config.get("project_courses", []):
-                staff = _classify_staff(b, staff_texts)
-                for pid, _ in staff.faculty[:1]:
-                    _add_reference(b, pid, current, IC_TARGET)
             continue
 
         section_id, kind = parsed
@@ -502,13 +464,12 @@ def _read_sections(b: _Builder, sheet: Sheet, header_row: int, resolver: CourseR
             continue
         staff = _classify_staff(b, staff_texts)
 
+        section = _make_section(b, section_id, kind, staff)
+        if section.faculty_max == 0:
+            b.no_faculty.append(f"{current} {section_id}")
         for pid, note in staff.faculty:
             _add_reference(b, pid, current, section_id, note)
-        for pid, note in staff.scholars:
-            _add_reference(b, pid, current, section_id, note)
-        _mark_ic_from_cells(b, current, staff_texts)
-
-        course.sections.append(_make_section(b, section_id, kind, staff))
+        course.sections.append(section)
 
 
 def _read_wilp_row(
@@ -532,44 +493,24 @@ def _read_wilp_row(
     title = cells[0][1]
     if faculty.match(title) or len(title) < 5:
         return
-    for _, text in cells[1:]:
-        pid = faculty.match(text)
-        if pid:
-            _add_wilp(b, b.people[pid], f"section sheet: {title.title()}")
-
-
-def _mark_ic_from_cells(b: _Builder, code: str, texts: list[str]) -> None:
-    faculty = _faculty_matcher(b)
-    for text in texts:
-        if re.search(r"-\s*IC\b", text, re.I):
-            pid = faculty.match(text)
-            if pid:
-                _add_reference(b, pid, code, IC_TARGET)
+    pids = [pid for _, text in cells[1:] if (pid := faculty.match(text))]
+    for pid in pids:
+        # The course's 3 units are divided among its faculty, as in the
+        # timetable app's course-load report.
+        _add_wilp(b, b.people[pid], f"section sheet: {title.title()}", share=len(pids))
 
 
 def _make_section(b: _Builder, section_id: str, kind: SectionKind, staff: _Staff) -> Section:
-    if b.options.staffing_from_reference:
-        n_fac, n_sch = len(staff.faculty), len(staff.scholars)
-        if kind == SectionKind.LECTURE:
-            n_fac, n_sch = max(1, n_fac), 0
-        return Section(
-            id=section_id,
-            kind=kind,
-            faculty_min=n_fac,
-            faculty_max=n_fac,
-            scholar_min=n_sch,
-            scholar_max=n_sch,
-            external_staff=staff.external,
-        )
-    templates = {
-        SectionKind.LECTURE: (1, 1, 0, 0),
-        SectionKind.TUTORIAL: (1, 1, 1, 2),
-        SectionKind.PRACTICAL: (1, 1, 1, 2),
-    }
-    fmin, fmax, smin, smax = templates[kind]
+    """The section, staffed as the department staffed it (possibly with no
+    faculty, when scholars ran it)."""
+    if not b.options.staffing_from_reference:
+        return Section(id=section_id, kind=kind, external_staff=staff.external)
+    n_fac = len(staff.faculty)
+    if kind == SectionKind.LECTURE and not staff.external:
+        n_fac = max(1, n_fac)
     return Section(
-        id=section_id, kind=kind, faculty_min=fmin, faculty_max=fmax,
-        scholar_min=smin, scholar_max=smax, external_staff=staff.external,
+        id=section_id, kind=kind, faculty_min=n_fac, faculty_max=n_fac,
+        external_staff=staff.external,
     )
 
 
@@ -577,24 +518,20 @@ def _add_reference(b: _Builder, pid: str, code: str, target: str, note: str = ""
     for a in b.reference:
         if a.person_id == pid and a.course_code == code and a.target == target:
             return
-    if target == IC_TARGET:
-        # One IC per course: the first source to name one wins.
-        if any(a.course_code == code and a.target == IC_TARGET for a in b.reference):
-            return
     b.reference.append(Assignment(person_id=pid, course_code=code, target=target, note=note))
 
 
-# ---- IC summary, projects, WILP ------------------------------------------------------------
+# ---- course summary, programme sheets, projects ------------------------------------------------------------
 
 
 def _read_ic_summary(b: _Builder, sheet: Sheet, resolver: CourseResolver) -> None:
     """
     Rows of: serial, code, title, IC, FD/HD, CDC/EL.
 
-    Names the IC of each course (reference) and its category. Courses here but
-    not in the section sheet are projects or courses run elsewhere.
+    Gives each course its category (CDC or elective) and level (FD or HD);
+    the IC column is ignored. Courses here but not in the section sheet are
+    projects or courses run elsewhere.
     """
-    faculty = _faculty_matcher(b)
     for row in sheet.rows():
         cells = {c: v for (r, c), v in sheet.cells.items() if r == row}
         code = next((extract_code(v) for v in cells.values() if extract_code(v)), None)
@@ -602,7 +539,6 @@ def _read_ic_summary(b: _Builder, sheet: Sheet, resolver: CourseResolver) -> Non
             continue
         values = list(cells.values())
         title = next((v for v in values if v != code and not extract_code(v) and len(v) > 4 and not v.upper().startswith("PROF")), "")
-        ic_text = next((v for v in values if re.match(r"\s*(PROF|DR)\.?", v, re.I)), None)
         tags = {v.strip().upper() for v in values}
 
         course = b.courses.get(code)
@@ -616,16 +552,54 @@ def _read_ic_summary(b: _Builder, sheet: Sheet, resolver: CourseResolver) -> Non
                 b.note(f"{code} is on the IC summary but has no sections in the section sheet; not staffed.")
                 continue
         if course.category != CourseCategory.PROJECT:
-            if "HD" in tags:
-                course.category = CourseCategory.HIGHER_DEGREE
+            if "CDC" in tags:
+                course.category = CourseCategory.CDC
+                course.category_source = "department IC summary: CDC"
             elif "EL" in tags:
                 course.category = CourseCategory.ELECTIVE
-        if ic_text:
-            pid = faculty.match(ic_text)
-            if pid:
-                _add_reference(b, pid, code, IC_TARGET)
-            else:
-                b.note(f"IC {ic_text.strip()!r} of {code} not matched to a faculty member.")
+                course.category_source = "department IC summary: EL"
+        if "HD" in tags:
+            course.level = CourseLevel.HD
+
+
+def _read_programme_sheets(b: _Builder, sheets: dict[str, Sheet]) -> None:
+    """
+    Programme structures: rows that pair a course with "CDC" or "EL" under a
+    programme name ("ME Thermal | ME G534 | ... | CDC"). A course compulsory
+    for any programme is a CDC, even if it is an elective for others: ME G515
+    is a CDC for M.E. Thermal and an elective for M.E. Design.
+
+    This is what settles higher-degree courses, which the timetable app stores
+    as "C" whatever they are.
+    """
+    for name, sheet in sheets.items():
+        programme = ""
+        for row in sheet.rows():
+            cells = [v.strip() for (r, c), v in sorted(sheet.cells.items()) if r == row and v.strip()]
+            if not cells:
+                continue
+            first = cells[0]
+            if not extract_code(first) and re.match(r"^(ME|M\.E\.)\s+[A-Z]", first, re.I):
+                programme = first
+            code = next((extract_code(v) for v in cells if extract_code(v)), None)
+            tags = {v.upper() for v in cells}
+            if not code or not programme or not ({"CDC", "EL"} & tags):
+                continue
+            (b.cdc_for if "CDC" in tags else b.el_for)[code].add(programme)
+    for code, course in b.courses.items():
+        cdc, el = sorted(b.cdc_for.get(code, ())), sorted(b.el_for.get(code, ()))
+        if course.category == CourseCategory.PROJECT or not (cdc or el):
+            continue
+        if cdc:
+            if course.category != CourseCategory.CDC:
+                b.note(f"{code}: an elective on the IC summary but a CDC for {', '.join(cdc)} "
+                       f"on the programme sheet; treated as a CDC.")
+            course.category = CourseCategory.CDC
+            course.category_source = (f"department programme sheet: CDC for {', '.join(cdc)}"
+                                      + (f"; elective for {', '.join(el)}" if el else ""))
+        elif not course.category_source:
+            course.category = CourseCategory.ELECTIVE
+            course.category_source = f"department programme sheet: elective for {', '.join(el)}"
 
 
 def _add_projects(b: _Builder) -> None:
@@ -634,15 +608,15 @@ def _add_projects(b: _Builder) -> None:
         if course is None:
             continue
         course.category = CourseCategory.PROJECT
+        course.category_source = "department config: project course"
         course.sections = []
         course.service = True
-        course.ic_units = float(b.config.get("project_ic_units", 1))
 
 
 def _resolve_preferences(b: _Builder, resolver: CourseResolver) -> None:
     unresolved: dict[str, int] = defaultdict(int)
     seen: set[tuple] = set()
-    for pid, text, kind, rank, consecutive, source in getattr(b, "raw_prefs", []):
+    for pid, text, kind, rank, (count, consecutive), source in getattr(b, "raw_prefs", []):
         code = resolver.resolve(text)
         if code is None:
             unresolved[text.strip()] += 1
@@ -656,7 +630,7 @@ def _resolve_preferences(b: _Builder, resolver: CourseResolver) -> None:
         b.preferences.append(
             Preference(
                 person_id=pid, course_code=code, kind=kind, rank=rank,
-                taught_consecutively=consecutive, source=source,
+                consecutive_count=count, taught_consecutively=consecutive, source=source,
             )
         )
     if unresolved:
@@ -673,6 +647,8 @@ def _finalise_courses(b: _Builder) -> None:
     for code, course in b.courses.items():
         if code in service:
             course.service = True
+        if re.match(r"^\S+ G", code):
+            course.level = CourseLevel.HD
         if course.category == CourseCategory.PROJECT:
             continue
         if code in overrides:
@@ -685,5 +661,3 @@ def _finalise_courses(b: _Builder) -> None:
         if SectionKind.PRACTICAL in kinds and not course.lab_units:
             course.lab_units = float(defaults.get("lab", 1))
             b.note(f"{code}: no lab units recorded; using {course.lab_units:g}.")
-        if not any(a.course_code == code and a.target == IC_TARGET for a in b.reference):
-            b.note(f"{code}: the workbook names no IC.")

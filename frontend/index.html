@@ -3,19 +3,38 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Faculty Allocator</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%232f5d8a'/><path d='M4 11V5h3.2a1.8 1.8 0 010 3.6H4m4.6 0L11 11' stroke='white' stroke-width='1.4' fill='none'/></svg>">
+  <title>Faculty Allocator · BITS Pilani</title>
+  <link rel="icon" type="image/png" href="assets/bits-logo.png">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <header class="topbar">
-    <a class="brand" href="#/">Faculty Allocator</a>
-    <nav id="crumbs" class="crumbs"></nav>
-    <span class="spacer"></span>
-    <span id="health" class="muted small"></span>
-  </header>
-  <main id="app" class="container"></main>
-  <div id="toast" class="toast" hidden></div>
+  <aside class="sidebar">
+    <a class="brand" href="#/">
+      <img src="assets/bits-logo.png" alt="BITS Pilani logo" width="56" height="56">
+      <span class="brand-text">
+        <span class="brand-name">Faculty Allocator</span>
+        <span class="brand-sub">BITS Pilani, Hyderabad Campus</span>
+      </span>
+    </a>
+    <nav class="nav" id="nav">
+      <a href="#/" data-nav="home"><span class="ico" aria-hidden="true">▤</span>Allocations</a>
+      <a href="#/new" data-nav="new"><span class="ico" aria-hidden="true">+</span>New allocation</a>
+      <a href="#/guide" data-nav="guide"><span class="ico" aria-hidden="true">?</span>How it works</a>
+    </nav>
+    <div class="sidebar-foot">
+      <span class="status-dot" id="health-dot"></span><span id="health">Connecting…</span>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="pagebar">
+      <nav id="crumbs" class="crumbs" aria-label="Breadcrumb"></nav>
+    </header>
+    <main id="app" class="container" aria-live="polite"></main>
+  </div>
+
+  <footer class="credit">Developed by Pranjal Agarwal</footer>
+  <div id="toast" class="toast" role="status" hidden></div>
   <script src="app.js"></script>
 </body>
 </html>

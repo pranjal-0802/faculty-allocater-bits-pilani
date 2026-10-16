@@ -9,8 +9,8 @@ sys.path.insert(0, str(BACKEND))
 
 from allocator.domain import (  # noqa: E402
     Course,
+    CourseCategory,
     Person,
-    PersonKind,
     Preference,
     Problem,
     Section,
@@ -22,11 +22,8 @@ WORKBOOK = ROOT / "data" / "raw" / "Course allocation sem-II, 2025-26.xlsx"
 
 
 def faculty(pid: str, **kw) -> Person:
-    return Person(id=pid, name=pid.upper(), kind=PersonKind.FACULTY, **kw)
-
-
-def scholar(pid: str, **kw) -> Person:
-    return Person(id=pid, name=pid.upper(), kind=PersonKind.SCHOLAR, **kw)
+    kw.setdefault("name", pid.upper())
+    return Person(id=pid, **kw)
 
 
 def lecture(sid: str = "L1", **kw) -> Section:
@@ -34,14 +31,10 @@ def lecture(sid: str = "L1", **kw) -> Section:
 
 
 def tutorial(sid: str = "T1", **kw) -> Section:
-    kw.setdefault("scholar_min", 1)
-    kw.setdefault("scholar_max", 1)
     return Section(id=sid, kind=SectionKind.TUTORIAL, **kw)
 
 
 def practical(sid: str = "P1", **kw) -> Section:
-    kw.setdefault("scholar_min", 1)
-    kw.setdefault("scholar_max", 1)
     return Section(id=sid, kind=SectionKind.PRACTICAL, **kw)
 
 
@@ -49,6 +42,10 @@ def course(code: str, *sections: Section, **kw) -> Course:
     kw.setdefault("lecture_units", 3)
     kw.setdefault("lab_units", 1)
     return Course(code=code, title=code, sections=list(sections), **kw)
+
+
+def elective(code: str, *sections: Section, **kw) -> Course:
+    return course(code, *sections, category=CourseCategory.ELECTIVE, **kw)
 
 
 def pref(pid: str, code: str, kind: SectionKind | None = SectionKind.LECTURE, rank: int = 1, **kw) -> Preference:

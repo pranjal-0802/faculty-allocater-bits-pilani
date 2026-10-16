@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import io
 import re
-import zipfile
 import xml.etree.ElementTree as ET
+import zipfile
 from dataclasses import dataclass, field
+from pathlib import Path
 
 _MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -80,7 +81,7 @@ class Sheet:
 
 def read_workbook(source: bytes | str) -> dict[str, Sheet]:
     """Read every sheet of an .xlsx file, given its bytes or a path."""
-    data = source if isinstance(source, bytes) else open(source, "rb").read()
+    data = source if isinstance(source, bytes) else Path(source).read_bytes()
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile as exc:

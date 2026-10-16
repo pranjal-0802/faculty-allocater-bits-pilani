@@ -2,32 +2,159 @@
   "department": "ME",
   "name": "Mechanical Engineering",
   "_comment": "Department-specific knowledge the workbook does not state. Every entry is something a person would otherwise have to know; edit here rather than in code.",
-
-  "service_courses": ["BITS F103", "BITS F111"],
+  "service_courses": [
+    "BITS F103",
+    "BITS F111"
+  ],
   "_service_courses": "Staffed as a department-wide duty: assigning someone who did not ask for them is not penalised, and their tutorials need not go to their lecturers. BITS F103 labs and BITS F111 tutorials are shared out this way in the Sem II 2025-26 allocation.",
-
-  "project_courses": ["ME F266", "ME F366", "ME F367", "ME F376", "ME F377"],
+  "project_courses": [
+    "ME F266",
+    "ME F366",
+    "ME F367",
+    "ME F376",
+    "ME F377"
+  ],
   "project_ic_units": 1,
   "wilp_units": 3,
-
-  "default_units": {"lecture": 3, "lab": 1},
-  "unit_overrides": {
-    "ME F318": {"lecture": 2, "lab": 1},
-    "ME F423": {"lecture": 3, "lab": 1},
-    "ME G624": {"lecture": 3, "lab": 1},
-    "ME G515": {"lecture": 3, "lab": 2},
-    "ME G534": {"lecture": 3, "lab": 2},
-    "MST G522": {"lecture": 3, "lab": 2},
-    "ME G611": {"lecture": 3, "lab": 2},
-    "MSE G512": {"lecture": 3, "lab": 2},
-    "ME F434": {"lecture": 3, "lab": 1},
-    "ME G633": {"lecture": 3, "lab": 1},
-    "ME G538": {"lecture": 3, "lab": 1},
-    "ME G539": {"lecture": 3, "lab": 1},
-    "ME F315": {"lecture": 3, "lab": 1}
+  "default_units": {
+    "lecture": 3,
+    "lab": 1
   },
-  "_unit_overrides": "Lecture and lab units where the workbook gives none (electives) or gives a value that does not add up (ME F318 is recorded as L2 P3 with no total). Read off the per-faculty Allocation sheet; the course database (lectureUnits / labUnits) is the authority once it is wired in.",
-
+  "unit_overrides": {
+    "AN F312": {
+      "lecture": 3,
+      "lab": 0
+    },
+    "AN F315": {
+      "lecture": 3,
+      "lab": 0
+    },
+    "BITS F103": {
+      "lecture": 2,
+      "lab": 2
+    },
+    "BITS F111": {
+      "lecture": 3,
+      "lab": 0
+    },
+    "BITS F441": {
+      "lecture": 3,
+      "lab": 0
+    },
+    "ME F218": {
+      "lecture": 2,
+      "lab": 0
+    },
+    "ME F219": {
+      "lecture": 3,
+      "lab": 1
+    },
+    "ME F220": {
+      "lecture": 3,
+      "lab": 1
+    },
+    "ME F221": {
+      "lecture": 3,
+      "lab": 0
+    },
+    "ME F315": {
+      "lecture": 2,
+      "lab": 1
+    },
+    "ME F318": {
+      "lecture": 2,
+      "lab": 1
+    },
+    "ME F319": {
+      "lecture": 3,
+      "lab": 0
+    },
+    "ME F320": {
+      "lecture": 3,
+      "lab": 0
+    },
+    "ME F321": {
+      "lecture": 2,
+      "lab": 1
+    },
+    "ME F323": {
+      "lecture": 3,
+      "lab": 0
+    },
+    "ME F341": {
+      "lecture": 2,
+      "lab": 1
+    },
+    "ME F423": {
+      "lecture": 3,
+      "lab": 1
+    },
+    "ME F426": {
+      "lecture": 3,
+      "lab": 0
+    },
+    "ME F434": {
+      "lecture": 3,
+      "lab": 1
+    },
+    "ME F483": {
+      "lecture": 3,
+      "lab": 0
+    },
+    "ME F484": {
+      "lecture": 3,
+      "lab": 0
+    },
+    "ME G515": {
+      "lecture": 3,
+      "lab": 2
+    },
+    "ME G534": {
+      "lecture": 3,
+      "lab": 2
+    },
+    "ME G538": {
+      "lecture": 3,
+      "lab": 2
+    },
+    "ME G539": {
+      "lecture": 3,
+      "lab": 2
+    },
+    "ME G611": {
+      "lecture": 2,
+      "lab": 3
+    },
+    "ME G624": {
+      "lecture": 3,
+      "lab": 2
+    },
+    "ME G633": {
+      "lecture": 3,
+      "lab": 2
+    },
+    "MF F418": {
+      "lecture": 3,
+      "lab": 0
+    },
+    "MF F421": {
+      "lecture": 3,
+      "lab": 1
+    },
+    "MF F485": {
+      "lecture": 3,
+      "lab": 0
+    },
+    "MSE G512": {
+      "lecture": 3,
+      "lab": 1
+    },
+    "MST G522": {
+      "lecture": 3,
+      "lab": 2
+    }
+  },
+  "_unit_overrides": "Lecture and lab units per course, as recorded in the timetable app for Sem II 2025-26. The ME workbook omits units for most electives, so these fill them in for the legacy replay; uploads made with the template state their own units.",
   "course_aliases": {
     "EDP": "BITS F103",
     "THERMO": "BITS F111",
@@ -57,7 +184,6 @@
     "CONVECTIVE HEAT AND MASS": "ME G534",
     "MICROFLUIDICS FOR THERMAL ENGINEERS": "ME G624"
   },
-
   "name_aliases": {
     "NSK": "N Suresh Kumar Reddy",
     "SKD": "Satish Kumar Dubey",
@@ -76,7 +202,8 @@
     "Erugu Prasanna": "E. Prasanna",
     "Nitin Ramesh K": "Nitin Rameshrao Kotkunde"
   },
-
-  "placeholder_staff": ["Civil-RS"],
+  "placeholder_staff": [
+    "Civil-RS"
+  ],
   "_placeholder_staff": "Entries in section rows that stand for staff from outside the department. They are kept as the section's external staff and never counted as a slot to fill."
 }

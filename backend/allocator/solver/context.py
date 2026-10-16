@@ -5,16 +5,21 @@ by the constraint and objective builders.
 Decision variables
 ------------------
 x[person, course, section]   person staffs that section            (bool)
-ic[person, course]           person is the course's IC             (bool)
-unfilled[course, section, k] staff of kind k the section still lacks (int)
+unfilled[course, section]    faculty the section still lacks        (int)
+
+Instructors-in-charge are not decided here: the department picks one from
+each course's instructors after the allocation.
 
 Derived variables (all exact, defined by equalities, not one-sided bounds, so
 any objective term may use them in either direction):
 
 teaches[person, course, kind]  person holds at least one section of that kind
-in_course[person, course]      person holds any role in the course
+in_course[person, course]      person holds any section of the course
 shared[course, section]        a lecture section has two faculty on it
 load[person]                   total load, scaled by SCALE to stay integral
+
+The rotation rule is applied here, by never creating a variable for a section
+a person is rotated out of (unless a lock requires it).
 """
 
 from __future__ import annotations
@@ -25,16 +30,16 @@ from dataclasses import dataclass, field
 from ortools.sat.python import cp_model
 
 from allocator.domain import (
-    IC_TARGET,
     Course,
     LockMode,
     Person,
-    PersonKind,
     Preference,
     Problem,
     Section,
     SectionKind,
 )
+from allocator.load import LoadTargets, load_targets
+from allocator.rules import RotationBar, is_barred, rotation_bars
 from allocator.settings import EligibilityMode, SolverSettings
 
 #: Loads are fractional (a shared 3-unit lecture is 1.5 each), CP-SAT is
@@ -59,37 +64,24 @@ class ModelContext:
     courses: dict[str, Course] = field(default_factory=dict)
     #: Preferences grouped by (person, course).
     prefs: dict[tuple[str, str], list[Preference]] = field(default_factory=dict)
+    targets: LoadTargets | None = None
+    bars: dict[tuple[str, str], list[RotationBar]] = field(default_factory=dict)
 
     x: dict[XKey, cp_model.IntVar] = field(default_factory=dict)
-    ic: dict[tuple[str, str], cp_model.IntVar] = field(default_factory=dict)
-    unfilled: dict[tuple[str, str, PersonKind], cp_model.IntVar] = field(
-        default_factory=dict
-    )
-    teaches: dict[tuple[str, str, SectionKind], cp_model.IntVar] = field(
-        default_factory=dict
-    )
+    unfilled: dict[tuple[str, str], cp_model.IntVar] = field(default_factory=dict)
+    teaches: dict[tuple[str, str, SectionKind], cp_model.IntVar] = field(default_factory=dict)
     in_course: dict[tuple[str, str], cp_model.IntVar] = field(default_factory=dict)
     shared: dict[tuple[str, str], cp_model.IntVar] = field(default_factory=dict)
     load: dict[str, cp_model.IntVar] = field(default_factory=dict)
 
-    #: Courses that need an IC but have nobody who could be one.
-    ic_without_candidates: list[str] = field(default_factory=list)
-
     # ---- lookups ------------------------------------------------------------
 
-    def section_vars(
-        self, course: Course, section: Section, kind: PersonKind
-    ) -> list[tuple[str, cp_model.IntVar]]:
+    def section_vars(self, course: Course, section: Section) -> list[tuple[str, cp_model.IntVar]]:
         return [
             (pid, var)
             for (pid, code, sid), var in self.x.items()
-            if code == course.code
-            and sid == section.id
-            and self.people[pid].kind == kind
+            if code == course.code and sid == section.id
         ]
-
-    def person_vars(self, person_id: str) -> list[tuple[XKey, cp_model.IntVar]]:
-        return [(k, v) for k, v in self.x.items() if k[0] == person_id]
 
     def listed(self, person_id: str, course_code: str) -> bool:
         return (person_id, course_code) in self.prefs
@@ -104,12 +96,17 @@ class ModelContext:
                 return lock.mode
         return None
 
+    def band(self, person_id: str):
+        return self.targets.bands[person_id]
+
 
 def build_context(problem: Problem, settings: SolverSettings) -> ModelContext:
     """Create the model and every decision and derived variable."""
     ctx = ModelContext(model=cp_model.CpModel(), problem=problem, settings=settings)
     ctx.people = {p.id: p for p in problem.people}
     ctx.courses = {c.code: c for c in problem.courses}
+    ctx.targets = load_targets(problem, settings)
+    ctx.bars = rotation_bars(problem, settings)
 
     grouped: dict[tuple[str, str], list[Preference]] = defaultdict(list)
     for pref in problem.preferences:
@@ -118,7 +115,6 @@ def build_context(problem: Problem, settings: SolverSettings) -> ModelContext:
     ctx.prefs = dict(grouped)
 
     _create_section_vars(ctx)
-    _create_ic_vars(ctx)
     _create_unfilled_vars(ctx)
     _create_teaches_vars(ctx)
     _create_in_course_vars(ctx)
@@ -126,12 +122,20 @@ def build_context(problem: Problem, settings: SolverSettings) -> ModelContext:
     return ctx
 
 
-def _eligible(ctx: ModelContext, person: Person, course: Course, target: str) -> bool:
-    """Whether a person is a volunteer (or forced) candidate for a target."""
-    mode = ctx.locked(person.id, course.code, target)
+def _allowed(ctx: ModelContext, person: Person, course: Course, section: Section) -> bool:
+    """Whether the hard rules let the person hold the section at all."""
+    mode = ctx.locked(person.id, course.code, section.id)
     if mode == LockMode.FORBID:
         return False
     if mode == LockMode.REQUIRE:
+        # A lock is the department's own decision and wins over rotation.
+        return True
+    return not is_barred(ctx.bars, person.id, course.code, section.kind)
+
+
+def _volunteer(ctx: ModelContext, person: Person, course: Course, section: Section) -> bool:
+    """Whether a person is a natural candidate (asked, duty or locked)."""
+    if ctx.locked(person.id, course.code, section.id) == LockMode.REQUIRE:
         return True
     if ctx.settings.eligibility == EligibilityMode.PENALISED:
         return True
@@ -142,75 +146,34 @@ def _create_section_vars(ctx: ModelContext) -> None:
     shortlist = ctx.settings.eligibility == EligibilityMode.SHORTLIST
     for course in ctx.problem.courses:
         for section in course.sections:
-            for kind, slots in (
-                (PersonKind.FACULTY, section.faculty_max),
-                (PersonKind.SCHOLAR, section.scholar_max),
-            ):
-                if slots <= 0:
-                    continue
-                people = [p for p in ctx.problem.people if p.kind == kind]
-                chosen = [p for p in people if _eligible(ctx, p, course, section.id)]
-                if shortlist and len(chosen) < slots + ctx.settings.shortlist_spare:
-                    # Too few volunteers: open the section to everyone not
-                    # explicitly forbidden, and let the penalty decide.
-                    chosen = [
-                        p
-                        for p in people
-                        if ctx.locked(p.id, course.code, section.id) != LockMode.FORBID
-                    ]
-                for person in chosen:
-                    ctx.x[(person.id, course.code, section.id)] = ctx.model.NewBoolVar(
-                        f"x|{person.id}|{course.code}|{section.id}"
-                    )
-
-
-def _create_ic_vars(ctx: ModelContext) -> None:
-    for course in ctx.problem.courses:
-        if not course.ic_required:
-            continue
-        has_lectures = any(s.kind == SectionKind.LECTURE for s in course.sections)
-        for person in ctx.problem.people:
-            if person.kind != PersonKind.FACULTY:
+            slots = section.faculty_max
+            if slots <= 0:
                 continue
-            lock = ctx.locked(person.id, course.code, IC_TARGET)
-            if lock == LockMode.FORBID:
-                continue
-            can_lecture = any(
-                (person.id, course.code, s.id) in ctx.x
-                for s in course.sections
-                if s.kind == SectionKind.LECTURE
-            )
-            if ctx.settings.ic_must_lecture and has_lectures:
-                # Whoever may lecture may be IC; nobody else, bar a lock.
-                if not (can_lecture or lock == LockMode.REQUIRE):
-                    continue
-            elif not _eligible(ctx, person, course, IC_TARGET):
-                continue
-            ctx.ic[(person.id, course.code)] = ctx.model.NewBoolVar(
-                f"ic|{person.id}|{course.code}"
-            )
-        if not any(code == course.code for _, code in ctx.ic):
-            ctx.ic_without_candidates.append(course.code)
+            allowed = [p for p in ctx.problem.people if _allowed(ctx, p, course, section)]
+            chosen = [p for p in allowed if _volunteer(ctx, p, course, section)]
+            if shortlist and len(chosen) < slots + ctx.settings.shortlist_spare:
+                # Too few volunteers: open the section to everyone the hard
+                # rules allow, and let the unlisted penalty decide.
+                chosen = allowed
+            for person in chosen:
+                ctx.x[(person.id, course.code, section.id)] = ctx.model.NewBoolVar(
+                    f"x|{person.id}|{course.code}|{section.id}"
+                )
 
 
 def _create_unfilled_vars(ctx: ModelContext) -> None:
     for course in ctx.problem.courses:
         for section in course.sections:
-            for kind, need in (
-                (PersonKind.FACULTY, section.faculty_min),
-                (PersonKind.SCHOLAR, section.scholar_min),
-            ):
-                if need > 0:
-                    ctx.unfilled[(course.code, section.id, kind)] = ctx.model.NewIntVar(
-                        0, need, f"unfilled|{course.code}|{section.id}|{kind.value}"
-                    )
+            if section.faculty_min > 0:
+                ctx.unfilled[(course.code, section.id)] = ctx.model.NewIntVar(
+                    0, section.faculty_min, f"unfilled|{course.code}|{section.id}"
+                )
 
 
 def _create_teaches_vars(ctx: ModelContext) -> None:
     grouped: dict[tuple[str, str, SectionKind], list] = defaultdict(list)
     for (pid, code, sid), var in ctx.x.items():
-        kind = next(s.kind for s in ctx.courses[code].sections if s.id == sid)
-        grouped[(pid, code, kind)].append(var)
+        grouped[(pid, code, ctx.courses[code].section(sid).kind)].append(var)
     for key, vars_ in grouped.items():
         if len(vars_) == 1:
             ctx.teaches[key] = vars_[0]
@@ -224,8 +187,6 @@ def _create_in_course_vars(ctx: ModelContext) -> None:
     grouped: dict[tuple[str, str], list] = defaultdict(list)
     for (pid, code, _), var in ctx.teaches.items():
         grouped[(pid, code)].append(var)
-    for key, var in ctx.ic.items():
-        grouped[key].append(var)
     for key, vars_ in grouped.items():
         if len(vars_) == 1:
             ctx.in_course[key] = vars_[0]
@@ -246,7 +207,7 @@ def _create_shared_vars(ctx: ModelContext) -> None:
         for section in course.sections:
             if section.kind != SectionKind.LECTURE or section.faculty_max < 2:
                 continue
-            vars_ = [v for _, v in ctx.section_vars(course, section, PersonKind.FACULTY)]
+            vars_ = [v for _, v in ctx.section_vars(course, section)]
             if len(vars_) < 2:
                 continue
             flag = ctx.model.NewBoolVar(f"shared|{course.code}|{section.id}")

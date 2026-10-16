@@ -23,12 +23,14 @@ from allocator import __version__
 from allocator.api import jobs
 from allocator.domain import Lock, Problem
 from allocator.evaluation import Report, report
-from allocator.export import people_csv, to_csv, to_timetable_json
+from allocator.export import allocation_xlsx, people_csv, sections_csv, to_csv, to_timetable_json
 from allocator.ingest import TemplateError, UploadFormat, import_upload
 from allocator.ingest.template import write_template
 from allocator.ingest.template_spec import spec_as_dict
 from allocator.ingest.workbook import DEPARTMENTS_DIR
+from allocator.load import LoadTargets, load_targets
 from allocator.settings import SolverSettings
+from allocator.shortfall import Shortfall, find_shortfalls
 from allocator.store import ProblemSummary, RunRecord, Store
 from allocator.validation import validate_problem
 
@@ -129,8 +131,10 @@ async def import_problem(
         form = await request.form()
         upload = form.get("file")
         if upload is None or isinstance(upload, str):
+            await form.close()
             raise HTTPException(400, "Multipart upload needs a file field named 'file'.")
         body = await upload.read()
+        await upload.close()
     else:
         body = await request.body()
     if not body:
@@ -155,6 +159,7 @@ async def import_problem(
         "format": used.value,
         "notes": problem.notes,
         "warnings": validate_problem(problem),
+        "shortfalls": [s.model_dump(mode="json") for s in find_shortfalls(problem, SolverSettings())],
     }
 
 
@@ -162,7 +167,8 @@ async def import_problem(
 def download_template(department: str = Query(""), problem_id: str | None = Query(None)) -> Response:
     """
     The upload template. With `problem_id`, pre-filled from that problem
-    (courses, sections, roster and preferences) as a starting point.
+    (courses, sections, roster and preferences) as a starting point for the
+    next semester.
     """
     problem = _problem_or_404(problem_id) if problem_id else None
     data = write_template(problem, department=department.upper())
@@ -238,7 +244,24 @@ def patch_person(problem_id: str, person_id: str, patch: PersonPatch) -> dict:
 @app.get("/api/problems/{problem_id}/validation")
 def problem_validation(problem_id: str) -> dict:
     problem = _problem_or_404(problem_id)
-    return {"warnings": validate_problem(problem), "notes": problem.notes}
+    settings = SolverSettings()
+    return {
+        "warnings": validate_problem(problem, settings),
+        "notes": problem.notes,
+        "shortfalls": [s.model_dump(mode="json") for s in find_shortfalls(problem, settings)],
+    }
+
+
+@app.post("/api/problems/{problem_id}/shortfalls")
+def problem_shortfalls(problem_id: str, settings: SolverSettings | None = None) -> list[Shortfall]:
+    """Courses with fewer volunteers than places, under the given settings."""
+    return find_shortfalls(_problem_or_404(problem_id), settings or SolverSettings())
+
+
+@app.post("/api/problems/{problem_id}/targets")
+def problem_targets(problem_id: str, settings: SolverSettings | None = None) -> LoadTargets:
+    """Each person's Teaching Allocation and load target, and the baseline."""
+    return load_targets(_problem_or_404(problem_id), settings or SolverSettings())
 
 
 @app.post("/api/problems/{problem_id}/reference-report")
@@ -306,11 +329,33 @@ def export_assignments(run_id: str) -> PlainTextResponse:
     )
 
 
+@app.get("/api/runs/{run_id}/export/sections.csv")
+def export_sections(run_id: str) -> PlainTextResponse:
+    """One row per defined section: who takes L1, L2, T1, P1... of every course."""
+    problem, run = _completed(run_id)
+    return PlainTextResponse(
+        sections_csv(problem, run.result.allocation),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="sections-{run_id}.csv"'},
+    )
+
+
+@app.get("/api/runs/{run_id}/export/allocation.xlsx")
+def export_xlsx(run_id: str) -> Response:
+    """Sections sheet (one row per section) and Faculty sheet (one row per person)."""
+    problem, run = _completed(run_id)
+    return Response(
+        allocation_xlsx(problem, run.result.allocation, run.result.report),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="allocation-{run_id}.xlsx"'},
+    )
+
+
 @app.get("/api/runs/{run_id}/export/people.csv")
 def export_people(run_id: str) -> PlainTextResponse:
     problem, run = _completed(run_id)
     return PlainTextResponse(
-        people_csv(problem, run.result.report.people),
+        people_csv(problem, run.result.allocation, run.result.report),
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="loads-{run_id}.csv"'},
     )
@@ -321,7 +366,7 @@ def export_timetable(run_id: str) -> Response:
     problem, run = _completed(run_id)
     return JSONResponse(
         to_timetable_json(problem, run.result.allocation),
-        headers={"Content-Disposition": f'attachment; filename="sections-{run_id}.json"'},
+        headers={"Content-Disposition": f'attachment; filename="timetable-{run_id}.json"'},
     )
 
 

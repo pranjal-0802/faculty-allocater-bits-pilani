@@ -16,7 +16,7 @@ import json
 import sys
 from pathlib import Path
 
-from allocator.domain import Allocation, Problem
+from allocator.domain import Problem
 from allocator.evaluation import Report, report
 from allocator.ingest.workbook import ImportOptions, import_workbook
 from allocator.settings import SolverSettings
@@ -29,17 +29,22 @@ def _load_problem(path: str) -> Problem:
 
 def _print_report(title: str, rep: Report) -> None:
     print(f"\n== {title}")
-    for kind, s in rep.load.items():
-        print(
-            f"  {kind:8} load mean {s.mean:5.2f}  sd {s.stdev:4.2f}  "
-            f"range {s.min:g}-{s.max:g}  under {s.under}  over {s.over}  (n={s.count})"
-        )
-    for kind, buckets in rep.preference_matches.items():
-        shown = ", ".join(f"{k} {v}" for k, v in buckets.items() if v)
-        print(f"  {kind:8} preference matches: {shown or '-'}")
+    s, t = rep.load, rep.targets
+    if t:
+        print(f"  standard load {t.baseline:g} units at {t.baseline_percent:g}% ({t.baseline_source}); "
+              f"work {t.work:g} units, targets add up to {t.target_total:g} "
+              f"({t.unavoidable_excess:g} units must go over targets)")
+    print(
+        f"  load mean {s.mean:5.2f}  sd {s.stdev:4.2f}  range {s.min:g}-{s.max:g}  "
+        f"under {s.under}  over target {s.over} (+{s.excess:g} units, worst +{s.max_over:g})  (n={s.count})"
+    )
+    shown = ", ".join(f"{k} {v}" for k, v in rep.preference_matches.items() if v)
+    print(f"  preference matches: {shown or '-'}")
     if rep.first_lecture_choice_rate is not None:
         print(f"  faculty who got their first lecture choice: {rep.first_lecture_choice_rate:.0%}")
-    print(f"  unfilled slots: {rep.unfilled_slots}   courses without IC: {len(rep.courses_without_ic)}")
+    print(f"  unfilled slots: {rep.unfilled_slots}")
+    for line in rep.rule_breaches:
+        print(f"  RULE BROKEN: {line}")
 
 
 def cmd_import(args: argparse.Namespace) -> int:
@@ -55,10 +60,9 @@ def cmd_import(args: argparse.Namespace) -> int:
     text = problem.model_dump_json(indent=2)
     if args.output:
         Path(args.output).write_text(text)
-    scholars = sum(1 for p in problem.people if p.kind.value == "scholar")
     sections = sum(len(c.sections) for c in problem.courses)
     print(
-        f"{problem.id}: {len(problem.people) - scholars} faculty, {scholars} scholars, "
+        f"{problem.id}: {len(problem.people)} faculty, "
         f"{len(problem.courses)} courses, {sections} sections, "
         f"{len(problem.preferences)} preferences, "
         f"{len(problem.reference.assignments) if problem.reference else 0} reference assignments"
@@ -93,6 +97,10 @@ def cmd_solve(args: argparse.Namespace) -> int:
     )
     for w in result.warnings:
         print(f"  ! {w}")
+    for sf in result.shortfalls:
+        print(f"  SHORT OF VOLUNTEERS: {sf.message}")
+        for line in sf.outcome:
+            print(f"      {line}")
     if result.error:
         print(result.error)
         return 1
@@ -103,7 +111,7 @@ def cmd_solve(args: argparse.Namespace) -> int:
         _print_report("Department's own allocation", c.reference_report)
         print("\n== Agreement with the department")
         print(f"  recall {c.recall}  lecture recall {c.lecture_recall}  "
-              f"IC agreement {c.ic_agreement}  identical sections {c.exact_sections}")
+              f"identical sections {c.exact_sections}")
     if args.output:
         Path(args.output).write_text(result.model_dump_json(indent=2))
     return 0
@@ -135,8 +143,8 @@ def cmd_bench(args: argparse.Namespace) -> int:
             print(f"{seed:>4} {r.status:9} {r.error}")
             continue
         gap = (r.best_bound - r.objective) / max(abs(r.best_bound), 1)
-        f = r.report.load["faculty"]
-        unlisted = sum(m.get("unlisted", 0) for m in r.report.preference_matches.values())
+        f = r.report.load
+        unlisted = r.report.preference_matches.get("unlisted", 0)
         print(f"{seed:>4} {r.status:9} {r.objective:>10.0f} {r.best_bound:>10.0f} {gap:>6.1%} "
               f"{r.report.first_lecture_choice_rate:>7.0%} {f.stdev:>5.2f} {f.under + f.over:>5} "
               f"{unlisted:>8} {r.build_seconds:>6.2f} {r.solve_seconds:>6.1f}")

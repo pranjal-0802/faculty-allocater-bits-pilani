@@ -69,13 +69,14 @@ def test_blank_template_reads_the_same_in_openpyxl():
 
 def test_template_structure_is_what_openpyxl_expects():
     wb = openpyxl.load_workbook(io.BytesIO(write_template(department="ME")))
-    assert wb.sheetnames == ["Instructions", "Courses", "Sections", "Faculty", "Research Scholars", "Lists"]
+    assert wb.sheetnames == ["Instructions", "Courses", "Sections", "Faculty", "Lists"]
     assert wb["Lists"].sheet_state == "hidden"
     faculty = wb["Faculty"]
     assert faculty.freeze_panes == "B2"
     sources = {v.formula1 for v in faculty.data_validations.dataValidation}
     assert "Lists!$A$2:$A$501" in sources  # course drop-downs
-    assert "Lists!$B$2:$B$3" in sources  # Yes / No
+    courses = {v.formula1 for v in wb["Courses"].data_validations.dataValidation}
+    assert "Lists!$B$2:$B$3" in courses  # Yes / No
 
 
 @pytest.mark.skipif(not WORKBOOK.exists(), reason="ME workbook not in data/raw")

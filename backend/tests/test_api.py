@@ -36,6 +36,14 @@ def test_problem_run_and_exports(client):
     sections = client.get(f"/api/runs/{run['id']}/export/timetable.json").json()
     assert {s["courseCode"] for s in sections} == {"X", "Y"}
 
+    # One row per defined section, in order, including ones nobody staffs.
+    rows = client.get(f"/api/runs/{run['id']}/export/sections.csv").text.splitlines()
+    assert rows[0].startswith("Course,Title,CDC/EL,FD/HD,Section,Kind,Faculty needed,Faculty 1")
+    assert [r.split(",")[0] + " " + r.split(",")[4] for r in rows[1:]] == ["X L1", "Y L1"]
+    xlsx = client.get(f"/api/runs/{run['id']}/export/allocation.xlsx")
+    assert xlsx.status_code == 200 and xlsx.content[:2] == b"PK"
+    assert client.get(f"/api/runs/{run['id']}/export/people.csv").text.startswith("Faculty,PSRN")
+
 
 def test_locks_and_person_patch(client):
     p = problem([faculty("a")], [course("X", lecture())], [pref("a", "X")])
@@ -65,7 +73,7 @@ def test_template_download_and_strict_upload(client):
     assert r.status_code == 201 and r.json()["format"] == "template"
 
     schema = client.get("/api/schema").json()
-    assert [s["name"] for s in schema["template"]["sheets"]] == ["Courses", "Sections", "Faculty", "Research Scholars"]
+    assert [s["name"] for s in schema["template"]["sheets"]] == ["Courses", "Sections", "Faculty"]
     assert "properties" in schema["problem"]
 
 
@@ -79,6 +87,18 @@ def test_multipart_upload(client):
     assert r.status_code == 201 and r.json()["format"] == "template"
     r = client.post("/api/problems/import", files={"other": ("x.xlsx", filled)})
     assert r.status_code == 400
+
+
+def test_validation_shortfalls_and_targets(client):
+    p = problem([faculty("a", teaching_percent=70), faculty("b")],
+                [course("X", lecture("L1"), lecture("L2")), course("Y", lecture())], [pref("a", "X")])
+    client.post("/api/problems", json=p.model_dump(mode="json"))
+    body = client.get("/api/problems/t/validation").json()
+    assert {s["course_code"] for s in body["shortfalls"]} == {"X", "Y"}
+    targets = client.post("/api/problems/t/targets", json={"load_baseline": 5}).json()
+    assert targets["bands"]["a"]["max"] == 7.0
+    flags = client.post("/api/problems/t/shortfalls", json={}).json()
+    assert len(flags) == 2
 
 
 def test_bad_upload_is_rejected(client):

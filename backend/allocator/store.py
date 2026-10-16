@@ -51,7 +51,6 @@ class ProblemSummary(BaseModel):
     department: str
     semester: str
     faculty: int
-    scholars: int
     courses: int
     sections: int
     preferences: int
@@ -98,15 +97,13 @@ class Store:
                 p = Problem.model_validate_json(path.read_text())
             except ValueError:
                 continue
-            scholars = sum(1 for x in p.people if x.kind.value == "scholar")
             out.append(
                 ProblemSummary(
                     id=p.id,
                     name=p.name,
                     department=p.department,
                     semester=p.semester,
-                    faculty=len(p.people) - scholars,
-                    scholars=scholars,
+                    faculty=len(p.people),
                     courses=len(p.courses),
                     sections=sum(len(c.sections) for c in p.courses),
                     preferences=len(p.preferences),
