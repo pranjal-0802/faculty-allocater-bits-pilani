@@ -203,7 +203,9 @@ def test_standard_load_is_the_department_average(settings):
     t = load_targets(p, settings)
     assert (t.baseline_source, t.baseline, t.work) == ("average", 4.0, 12)
     assert t.bands["a"].max == 4.0 and t.bands["c"].max == 4.0
-    assert t.bands["b"].max == 5.5  # 1.4 x 4 = 5.6, rounded to half units
+    assert t.bands["b"].max == 5.6  # 1.4 x 4, exact
+    settings.target_rounding = 0.5
+    assert load_targets(p, settings).bands["b"].max == 5.5  # rounded to half units
     assert t.default_percent == 50 and t.assumed == ["c"]
 
 

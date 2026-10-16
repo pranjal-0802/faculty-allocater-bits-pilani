@@ -85,7 +85,7 @@ Everything comes from the department's upload:
 
 | Rule | How it is enforced | Setting |
 |---|---|---|
-| **Load follows Teaching Allocation.** The standard load is the department's total teaching units divided by its number of faculty. Someone at 50% gets it, 70% gets 1.4 times it, 40% gets 0.8 times. A blank Teaching Allocation counts as 50%. | Soft, with the target as a ceiling: 300 points per unit over (more than any preference is worth), another 300 per unit past the first, and 60 per unit more than a unit under. | `load_baseline`, `baseline_mode`, `default_teaching_percent`, `overload_*`, `target_rounding` |
+| **Load follows Teaching Allocation.** The standard load is the department's total teaching units divided by its number of faculty. Someone at 50% gets it, 70% gets 1.4 times it, 40% gets 0.8 times. A blank Teaching Allocation counts as 50%. | Soft, with the target as a ceiling: 300 points per unit over (more than any preference is worth), another 300 per unit past the first, and 60 per unit more than a unit under. | `load_baseline`, `baseline_mode`, `default_teaching_percent`, `overload_*` |
 | **At most one CDC each.** Two courses can be CDC + elective or elective + elective, never CDC + CDC. | Hard. Any section of a CDC counts. Only first-degree CDCs count: service courses (BITS F103, BITS F111) and higher-degree courses don't. | `one_cdc_per_faculty`, `hd_cdcs_count` |
 | **Rotation.** A course taken 3 semesters running may not be taken again. | Hard: the person gets no variable for any section of that course. | `rotation_limit`, `rotation_scope`, `rotation_yes_without_count` |
 | **Underflow is flagged.** A course with fewer volunteers than places (one person asked, two lecture sections) is reported separately. | Before the run (problem overview, `/validation`) and in every result, with who ended up taking the places. | — |
@@ -171,7 +171,7 @@ Staffing minimums are deliberately soft. A slot nobody can fill costs 100,000 po
 
 The workbook in `data/raw` has the department's preference form and the allocation it actually made. The solver never sees the latter; it's kept as `Problem.reference` and used only for comparison. Both are scored with the same targets and rules.
 
-The problem has 36 faculty, 37 courses and 100 sections. The standard load is 5.42 units: 195 units over 36 faculty. The solver proves optimality, and gives the same answer for every seed:
+The problem has 36 faculty, 37 courses and 100 sections. The standard load is 5.42 units: 195 units over 36 faculty. The solver proves optimality (about 12 minutes with exact targets) and gives the same answer for every seed:
 
 | | Department (by hand) | Solver (proven optimal) |
 |---|---|---|
@@ -196,15 +196,16 @@ Agreement with the department: 36% of assignments and 53% of lecturers reproduce
 | 8 workers, everyone eligible | optimal in 55 s |
 | 8 workers, shortlist + greedy hint | optimal in 10–30 s, every seed |
 | + admin's rules, exact fractional targets | 5–9% gap at 120 s, a different answer per seed |
-| + targets rounded to half units (**default**) | optimal in 12–22 s, identical across seeds |
-| + average standard load, no ICs, HD CDCs not counted (**current**) | optimal in 15–30 s on an idle machine, identical across seeds; a few minutes when the machine is busy |
+| + targets rounded to half units | optimal in 12–22 s, identical across seeds |
+| + average standard load, no ICs, HD CDCs not counted, targets rounded | optimal in 15–30 s on an idle machine; a few minutes when busy |
+| same, exact targets (**default**: time is not a constraint) | optimal in about 12 minutes |
 | current + 12 workers | no faster |
 | current + explicit symmetry breaking | slower |
 
 What this shows:
 - **Worker count matters most.** CP-SAT runs one strategy per worker, and below 8 it drops the strategies that tighten the bound.
 - **Shortlisting costs nothing here.** Considering only volunteers, and opening a section to everyone only when it's short, shrinks the model and reaches the same optimum.
-- **Fractional targets are expensive to prove.** Loads come in half units, so exact targets like 5.34 leave the solver proving how to pack fractions.
+- **Exact targets are expensive to prove, and are the default.** Loads come in half units, so a target like 7.59 leaves the solver proving how to pack fractions. Since time isn't a constraint, targets are kept exact and the limit is 30 minutes; `target_rounding: 0.5` brings a run under a minute at the cost of rounding everyone's target.
 - **Explicit symmetry breaking is off by default.** CP-SAT already detects that the ten BITS F103 labs are interchangeable.
 - **Solve time depends on the machine being free.** The same problem took 15–30 s on an idle machine and up to 116 s while other work ran. More threads than 8 didn't help.
 - **Runs are queued, one at a time.** Each run uses 8 cores, so the API runs one solve at a time (`ALLOCATOR_PARALLEL_RUNS=1`).

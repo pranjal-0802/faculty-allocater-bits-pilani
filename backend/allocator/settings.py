@@ -96,9 +96,11 @@ class SolverSettings(BaseModel):
     #: Teaching Allocation assumed for someone who left it blank. None: the
     #: median of what everyone else wrote.
     default_teaching_percent: float | None = 50.0
-    #: Targets are rounded to the nearest multiple of this (loads come in
-    #: half units, so a target of 5.34 is read as 5.5). 0 keeps them exact.
-    target_rounding: float = 0.5
+    #: Round targets to the nearest multiple of this. 0 (default) keeps them
+    #: exact: 70% of a 5.42-unit standard load is a 7.59-unit target. Exact
+    #: targets take longer to prove optimal (about 12 minutes on the ME
+    #: replay, against under a minute at 0.5).
+    target_rounding: float = 0.0
     #: The target is a ceiling. The band runs from this far below it up to it.
     load_tolerance_below: float = 1.0
     #: Cost per unit below the band / above the target. Overload is priced
@@ -159,7 +161,9 @@ class SolverSettings(BaseModel):
     symmetry_breaking: bool = False
     #: Start the search from a greedy allocation instead of from nothing.
     greedy_hint: bool = True
-    time_limit_seconds: float = 120.0
+    #: Time is not a constraint: the solver stops as soon as it has proved the
+    #: optimum, and this is only a ceiling.
+    time_limit_seconds: float = 1800.0
     #: CP-SAT runs a portfolio of strategies, one per worker, and only at 8
     #: or more does it include the bound-tightening ones that prove
     #: optimality.

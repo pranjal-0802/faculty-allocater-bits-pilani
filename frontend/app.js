@@ -489,7 +489,7 @@ function problemFaculty(problem, idx, body, { targets }) {
   };
   search.oninput = draw;
   body.append(
-    callout("info", null, `Standard load ${fmt(targets.baseline)} units = ${fmt(targets.work)} units of work ÷ ${problem.people.length} faculty. A target is the standard load × Teaching Allocation ÷ 50, rounded to half units. Edit a row, press Save, then start a new run.`),
+    callout("info", null, `Standard load ${fmt(targets.baseline)} units = ${fmt(targets.work)} units of work ÷ ${problem.people.length} faculty. A target is the standard load × Teaching Allocation ÷ 50. Edit a row, press Save, then start a new run.`),
     h("div", { class: "row", style: "margin-bottom:12px" }, search), holder);
   draw();
 }
@@ -615,7 +615,7 @@ const SETTINGS_META = [
     ["underload_penalty", "Under-band penalty / unit", ""],
     ["max_overload_penalty", "Worst-overload penalty / unit", ""],
     ["load_tolerance_below", "Band below target (units)", ""],
-    ["target_rounding", "Round targets to (units)", "0 keeps them exact (slower to prove optimal)."],
+    ["target_rounding", "Round targets to (units)", "0 (default) keeps them exact; 0.5 is much faster but approximate."],
     ["tutorial_follows_lecture", "Tutorials go to the course's lecturers", ""],
     ["tutorial_follows_lecture_penalty", "…penalty when not", ""],
     ["lecturer_takes_tutorial", "Each lecturer takes a tutorial", ""],
@@ -692,7 +692,7 @@ async function problemRuns(problem, idx, body) {
     h("td", {}, h("button", { class: "ghost danger", onclick: async () => { await api(`/api/runs/${r.id}`, { method: "DELETE" }); render(); } }, "Delete"))));
   body.append(
     h("div", { class: "card" },
-      h("div", { class: "card-head" }, h("h3", {}, "New run"), h("span", { class: "muted small" }, `Usually under a minute; at most ${fmt(defaults.time_limit_seconds, 0)} seconds.`)),
+      h("div", { class: "card-head" }, h("h3", {}, "New run"), h("span", { class: "muted small" }, `The solver stops as soon as it has proved the best allocation: usually a few minutes, at most ${fmt(defaults.time_limit_seconds / 60, 0)} minutes.`)),
       h("p", { class: "muted" }, "The defaults follow the admin's rules. Change anything below to try a variant; each run is kept so you can compare."),
       form.el,
       h("div", { class: "row" }, start, label)),
